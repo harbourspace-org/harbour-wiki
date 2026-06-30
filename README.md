@@ -26,10 +26,38 @@ Harbour.Wiki  (this repo)
 Knottra is the engine (infrastructure); Harbour.Wiki is the product students
 use. This repo consumes Knottra's API — it does **not** reimplement fusion.
 
-## Status
+## Stack
 
-Greenfield. The Knottra engine it builds on is production-ready (see
-`../knottra`). App stack and UI to be decided.
+Next.js (App Router) · TypeScript · Tailwind v4 · pnpm. Server routes hold the
+Knottra API key and the answer LLM; the browser never sees secrets. Design
+direction: "Editorial Almanac" — paper/ink palette, Fraunces + IBM Plex.
+
+## Run locally
+
+```bash
+# 1) Start the Knottra engine (separate repo)
+cd ../knottra && docker compose up -d db
+uv run python -m uvicorn knottra.main:app --port 8000 &
+uv run procrastinate --app knottra.worker.app.procrastinate_app worker --queues fusion,maintenance &
+
+# 2) Start this app
+cd ../harbour-wiki
+cp .env.example .env.local   # set KNOTTRA_API_KEY + LLM_API_KEY
+pnpm install
+pnpm dev                     # http://localhost:3000
+```
+
+Open the app, click **Seed demo lecture** (ingests a sample lecture and flushes
+it — the worker fuses it), then read the compendium, search it, or ask a
+question. The `/api/*` routes proxy Knottra (`/record`, `/search`) and run the
+grounded-answer LLM.
+
+## What it consumes
+
+- `GET /v1/sessions/{id}/record` — the fused concepts/links (rendered as entries)
+- `GET /v1/sessions/{id}/record/search?q=` — semantic search (the search panel)
+- `POST /v1/sessions/{id}/events` + `/flush` — the demo seed
+- The answer LLM is grounded **only** in Knottra's structured slices.
 
 ## Related
 
