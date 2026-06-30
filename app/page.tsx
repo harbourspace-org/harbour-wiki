@@ -1,6 +1,11 @@
-import { SessionEntry } from "@/components/SessionEntry";
+import Link from "next/link";
 
-export default function Home() {
+import { CourseSeed } from "@/components/CourseSeed";
+import { SessionEntry } from "@/components/SessionEntry";
+import { listCourses } from "@/lib/courses";
+
+export default async function Home() {
+  const courses = await listCourses().catch(() => []);
   return (
     <main className="shell">
       <header className="masthead">
@@ -33,7 +38,32 @@ export default function Home() {
           compendium, search it by meaning, or ask a question answered straight
           from what was taught.
         </p>
-        <SessionEntry />
+        <div style={{ marginTop: "2.5rem" }}>
+          <p className="label">Courses</p>
+          {courses.length > 0 ? (
+            <ul style={{ listStyle: "none", padding: 0, marginTop: "0.6rem" }}>
+              {courses.map((c) => (
+                <li key={c.id} style={{ padding: "0.5rem 0", borderBottom: "1px solid var(--rule)" }}>
+                  <Link className="plain" href={`/course/${c.id}`} style={{ fontFamily: "var(--font-display), serif", fontSize: "1.2rem" }}>
+                    {c.title}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted" style={{ marginTop: "0.5rem", fontSize: "0.92rem" }}>
+              No courses yet. Seed the demo to see a woven lecture wiki.
+            </p>
+          )}
+          <div style={{ marginTop: "1rem" }}>
+            <CourseSeed />
+          </div>
+        </div>
+
+        <div style={{ marginTop: "2.5rem", paddingTop: "1.5rem", borderTop: "1px solid var(--rule)" }}>
+          <p className="label">Or open a single session directly</p>
+          <SessionEntry />
+        </div>
         <p className="muted" style={{ marginTop: "1.4rem", fontSize: "0.82rem" }}>
           Requires the Knottra API + worker running locally (see knottra/docs/RUNNING.md).
         </p>
