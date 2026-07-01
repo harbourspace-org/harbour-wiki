@@ -17,5 +17,5 @@ RUN pnpm build
 
 ENV NODE_ENV=production
 EXPOSE 3000
-# next start honours $PORT (Railway injects it); default to 3000 for local runs.
-CMD ["sh", "-c", "pnpm start -- -p ${PORT:-3000} -H 0.0.0.0"]
+# next start binds 0.0.0.0 and honours $PORT (Railway injects it) with no flags.
+CMD ["pnpm", "start"]
