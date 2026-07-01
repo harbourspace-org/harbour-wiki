@@ -9,6 +9,3 @@ node_modules
 *.local
 npm-debug.log*
 .DS_Store
-
-# The lecture recorder is a standalone Python CLI, not part of the web image.
-capture
