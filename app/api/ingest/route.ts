@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
+import { addCourseSession, upsertCourse } from "@/lib/courses";
 import { flush, ingest, setConfig } from "@/lib/knottra";
 
 // Single gateway to Knottra for capture clients. The recorder never holds the
@@ -21,6 +22,10 @@ const bodySchema = z.object({
   domainPrompt: z.string().max(8000).optional(),
   events: z.array(eventSchema).max(500).optional(),
   flush: z.boolean().optional(),
+  // Optional: register this session as a browsable course/lecture so it shows
+  // in the wiki course list and is reachable by MCP search_lectures.
+  course: z.object({ id: z.string().min(1).max(256), title: z.string().min(1).max(256) }).optional(),
+  label: z.string().min(1).max(256).optional(),
 });
 
 function authorized(req: NextRequest): boolean {
@@ -39,11 +44,16 @@ export async function POST(req: NextRequest) {
   if (!parsed.success) {
     return NextResponse.json({ error: "Invalid body", issues: parsed.error.issues }, { status: 400 });
   }
-  const { session, domainPrompt, events, flush: doFlush } = parsed.data;
+  const { session, domainPrompt, events, flush: doFlush, course, label } = parsed.data;
 
   try {
     // Order matters: config claims/creates the session, then events, then flush.
     if (domainPrompt !== undefined) await setConfig(session, domainPrompt);
+    // Register the lecture in the app's course index so it's browsable/searchable.
+    if (course) {
+      await upsertCourse(course.id, course.title, domainPrompt);
+      await addCourseSession(course.id, session, 0, label ?? session);
+    }
     if (events && events.length > 0) await ingest(session, events);
     if (doFlush) await flush(session);
 
@@ -51,6 +61,7 @@ export async function POST(req: NextRequest) {
       status: "ok",
       session,
       configured: domainPrompt !== undefined,
+      registeredCourse: course?.id ?? null,
       ingested: events?.length ?? 0,
       flushed: Boolean(doFlush),
     });
