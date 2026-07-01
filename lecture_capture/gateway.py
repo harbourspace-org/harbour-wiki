@@ -33,8 +33,14 @@ class Gateway:
         response.raise_for_status()
 
     def ensure_session(self) -> None:
-        """Create/claim the session by setting its fusion config."""
-        self._post({"domainPrompt": self._cfg.domain_prompt})
+        """Create/claim the session, set its config, and register it as a course."""
+        self._post(
+            {
+                "domainPrompt": self._cfg.domain_prompt,
+                "course": {"id": self._cfg.course_id, "title": self._cfg.course_title},
+                "label": self._cfg.label,
+            }
+        )
 
     def send_speech(self, content: str, confidence: float, when: datetime) -> None:
         self._post(

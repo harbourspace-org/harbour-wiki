@@ -29,6 +29,9 @@ class Config:
     token: str | None  # capture Bearer token; may be empty for open/local dev
     session_id: str
     domain_prompt: str
+    course_id: str  # registers the lecture in the wiki course index (MCP search)
+    course_title: str
+    label: str
     model_size: str
     chunk_seconds: float
     language: str | None

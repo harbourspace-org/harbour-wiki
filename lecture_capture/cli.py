@@ -49,6 +49,21 @@ def _build_config(argv: list[str] | None) -> Config:
         help="Fusion guidance for this session",
     )
     parser.add_argument(
+        "--course",
+        default=os.getenv("CAPTURE_COURSE", ""),
+        help="Course id to file this lecture under (default: the session id)",
+    )
+    parser.add_argument(
+        "--course-title",
+        default=os.getenv("CAPTURE_COURSE_TITLE", ""),
+        help="Human title for the course (default: the course id)",
+    )
+    parser.add_argument(
+        "--label",
+        default=os.getenv("CAPTURE_LABEL", "Live capture"),
+        help="Label for this lecture within the course",
+    )
+    parser.add_argument(
         "--model",
         default=os.getenv("WHISPER_MODEL", DEFAULT_MODEL),
         help="faster-whisper model size (e.g. tiny.en, base.en, small.en)",
@@ -73,11 +88,15 @@ def _build_config(argv: list[str] | None) -> Config:
     )
     args = parser.parse_args(argv)
 
+    course_id = args.course or args.session
     return Config(
         base_url=args.base_url.rstrip("/"),
         token=args.token or None,
         session_id=args.session,
         domain_prompt=args.domain_prompt,
+        course_id=course_id,
+        course_title=args.course_title or course_id,
+        label=args.label,
         model_size=args.model,
         chunk_seconds=args.chunk_seconds,
         language=args.language,
