@@ -1,17 +1,19 @@
 # lecture-capture
 
-**The missing capture layer** for Harbour.Wiki — a native recorder that turns a
-live lecture into the `speech` events Knottra fuses.
+**The capture layer** for Harbour.Wiki — a native recorder that turns a live
+lecture into the `speech` events the system fuses.
 
 ```
-mic ──▶ faster-whisper (local, offline) ──▶ POST /v1/sessions/{id}/events ──▶ /flush
-        transcribe each chunk               modality:"speech"                 (on exit)
-                                                                              └▶ Knottra fuses ▶ wiki + MCP
+mic ──▶ faster-whisper (local, offline) ──▶ POST {app}/api/ingest ──▶ Harbour.Wiki ──▶ Knottra
+        transcribe each chunk               modality:"speech"          (holds the Knottra key)   fuses ▶ wiki + MCP
 ```
 
-This is Layer 1–2 (capture + transcription) — deliberately **not** part of the
-Knottra engine, which only ever ingests already-extracted text events. No audio
-ever leaves the machine: transcription is fully local.
+It talks **only to Harbour.Wiki**, which is the single gateway to Knottra. The
+recorder never holds the Knottra API key — it carries a capture token, and the
+app forwards to Knottra with its own key. (Because every write goes through the
+app's one key, the session is always owned by and readable by the wiki — no
+per-key tenancy mismatch.) Transcription is fully local: no audio leaves the
+machine.
 
 ## Prerequisites
 
@@ -23,8 +25,8 @@ ever leaves the machine: transcription is fully local.
 ## Setup
 
 ```bash
-cd capture
-cp .env.example .env          # set KNOTTRA_API_KEY (see the warning in the file)
+cd harbour-wiki/capture
+cp .env.example .env          # set HARBOUR_WIKI_BASE_URL + CAPTURE_TOKEN
 
 # with uv (recommended):
 uv sync
@@ -32,9 +34,9 @@ uv sync
 python -m venv .venv && source .venv/bin/activate && pip install -e .
 ```
 
-> **API key:** use the *same* key Harbour.Wiki reads with (its `KNOTTRA_API_KEY`
-> on Railway). Knottra sessions are owned by the key that creates them, so a
-> mismatched key makes the wiki return 403 for the lecture.
+> **Token:** `CAPTURE_TOKEN` must match the value set on the Harbour.Wiki
+> service. If the app leaves `/api/ingest` open (no token configured), you can
+> leave it empty for local dev.
 
 ## Run
 
@@ -63,8 +65,8 @@ Speak into the mic. Each chunk prints as it's sent:
 | Flag | Env | Default | Notes |
 |---|---|---|---|
 | `--session` | — | *(required)* | Lecture / session id |
-| `--base-url` | `KNOTTRA_BASE_URL` | `http://127.0.0.1:8000` | Deployed or local engine |
-| `--api-key` | `KNOTTRA_API_KEY` | — | Same key as Harbour.Wiki |
+| `--base-url` | `HARBOUR_WIKI_BASE_URL` | `http://127.0.0.1:3000` | Harbour.Wiki (the gateway) |
+| `--token` | `CAPTURE_TOKEN` | — | Must match the app's `CAPTURE_TOKEN` |
 | `--model` | `WHISPER_MODEL` | `base.en` | `tiny.en` fastest → `small.en` best |
 | `--chunk-seconds` | `CHUNK_SECONDS` | `6` | Audio per event; lower = snappier, more calls |
 | `--language` | `WHISPER_LANGUAGE` | autodetect | e.g. `en` |

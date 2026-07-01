@@ -1,8 +1,8 @@
-"""Entry point: mic → local Whisper → Knottra speech events, flush on exit.
+"""Entry point: mic → local Whisper → Harbour.Wiki → Knottra, flush on exit.
 
 Records the microphone in fixed chunks, transcribes each locally, and posts it
-as a ``speech`` event to a Knottra session. Ctrl+C stops cleanly and flushes so
-the trailing window gets fused.
+as a ``speech`` event to Harbour.Wiki's ingest gateway (which forwards to
+Knottra). Ctrl+C stops cleanly and flushes so the trailing window gets fused.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from .config import (
     DEFAULT_MODEL,
     Config,
 )
-from .knottra_client import KnottraClient
+from .gateway import Gateway
 from .transcribe import Transcriber
 
 
@@ -30,22 +30,22 @@ def _build_config(argv: list[str] | None) -> Config:
     load_dotenv()
     parser = argparse.ArgumentParser(
         prog="lecture-capture",
-        description="Record a lecture and stream transcribed speech into Knottra.",
+        description="Record a lecture and stream transcribed speech into Harbour.Wiki.",
     )
     parser.add_argument("--session", required=True, help="Session id (the lecture id)")
     parser.add_argument(
         "--base-url",
-        default=os.getenv("KNOTTRA_BASE_URL", "http://127.0.0.1:8000"),
-        help="Knottra base URL (env KNOTTRA_BASE_URL)",
+        default=os.getenv("HARBOUR_WIKI_BASE_URL", "http://127.0.0.1:3000"),
+        help="Harbour.Wiki base URL (env HARBOUR_WIKI_BASE_URL)",
     )
     parser.add_argument(
-        "--api-key",
-        default=os.getenv("KNOTTRA_API_KEY", ""),
-        help="Knottra API key (env KNOTTRA_API_KEY)",
+        "--token",
+        default=os.getenv("CAPTURE_TOKEN", ""),
+        help="Capture token for Harbour.Wiki's /api/ingest (env CAPTURE_TOKEN)",
     )
     parser.add_argument(
         "--domain-prompt",
-        default=os.getenv("KNOTTRA_DOMAIN_PROMPT", DEFAULT_DOMAIN_PROMPT),
+        default=os.getenv("CAPTURE_DOMAIN_PROMPT", DEFAULT_DOMAIN_PROMPT),
         help="Fusion guidance for this session",
     )
     parser.add_argument(
@@ -73,16 +73,9 @@ def _build_config(argv: list[str] | None) -> Config:
     )
     args = parser.parse_args(argv)
 
-    if not args.api_key:
-        parser.error(
-            "No API key. Set KNOTTRA_API_KEY (env/.env) or pass --api-key.\n"
-            "        Use the SAME key Harbour.Wiki reads with, or the wiki gets a "
-            "403 and cannot show this lecture."
-        )
-
     return Config(
         base_url=args.base_url.rstrip("/"),
-        api_key=args.api_key,
+        token=args.token or None,
         session_id=args.session,
         domain_prompt=args.domain_prompt,
         model_size=args.model,
@@ -94,16 +87,16 @@ def _build_config(argv: list[str] | None) -> Config:
 
 def main(argv: list[str] | None = None) -> int:
     cfg = _build_config(argv)
-    client = KnottraClient(cfg)
+    gateway = Gateway(cfg)
 
     print(f"[capture] loading Whisper model '{cfg.model_size}' (first run downloads it) …", flush=True)
     transcriber = Transcriber(cfg.model_size, cfg.language)
 
-    print(f"[capture] claiming session '{cfg.session_id}' on {cfg.base_url} …", flush=True)
+    print(f"[capture] claiming session '{cfg.session_id}' via {cfg.base_url} …", flush=True)
     try:
-        client.ensure_session()
+        gateway.ensure_session()
     except requests.RequestException as error:
-        print(f"[capture] could not reach Knottra: {error}", file=sys.stderr, flush=True)
+        print(f"[capture] could not reach Harbour.Wiki: {error}", file=sys.stderr, flush=True)
         return 1
 
     print("[capture] recording — speak into the mic. Ctrl+C to stop & flush.", flush=True)
@@ -116,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not transcript.text:
                     continue
                 try:
-                    client.send_speech(transcript.text, transcript.confidence, spoken_at)
+                    gateway.send_speech(transcript.text, transcript.confidence, spoken_at)
                     events += 1
                     print(f"[{events:>3}] ({transcript.confidence:.2f}) {transcript.text}", flush=True)
                 except requests.RequestException as error:
@@ -125,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\n[capture] stopping …", flush=True)
 
     try:
-        client.flush()
+        gateway.flush()
         print(
             f"[capture] flushed session '{cfg.session_id}' ({events} events). "
             "Fusion runs in the background — open the wiki.",

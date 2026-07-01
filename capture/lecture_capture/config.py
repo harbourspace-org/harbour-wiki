@@ -1,8 +1,9 @@
 """Runtime configuration for the lecture capture client.
 
-Values come from CLI flags, falling back to environment variables (and a local
-.env). Secrets (the Knottra API key) are never hard-coded — they must be
-supplied via env or flag.
+The recorder talks ONLY to Harbour.Wiki (the single gateway to Knottra) — it
+never holds the Knottra API key. It authenticates to the app with a capture
+token. Values come from CLI flags, falling back to environment (and a local
+.env); secrets are never hard-coded.
 """
 
 from __future__ import annotations
@@ -24,8 +25,8 @@ DEFAULT_DOMAIN_PROMPT = (
 class Config:
     """Immutable run configuration (see coding-style: no in-place mutation)."""
 
-    base_url: str
-    api_key: str
+    base_url: str  # Harbour.Wiki base URL (the gateway)
+    token: str | None  # capture Bearer token; may be empty for open/local dev
     session_id: str
     domain_prompt: str
     model_size: str
@@ -34,13 +35,5 @@ class Config:
     device: int | None  # mic input-device index; None = system default
 
     @property
-    def events_url(self) -> str:
-        return f"{self.base_url}/v1/sessions/{self.session_id}/events"
-
-    @property
-    def config_url(self) -> str:
-        return f"{self.base_url}/v1/sessions/{self.session_id}/config"
-
-    @property
-    def flush_url(self) -> str:
-        return f"{self.base_url}/v1/sessions/{self.session_id}/flush"
+    def ingest_url(self) -> str:
+        return f"{self.base_url}/api/ingest"
