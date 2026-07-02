@@ -12,6 +12,7 @@ import {
   lectureByNumber,
   syncLectureNote,
 } from "@/lib/lectures";
+import { splitConspect } from "@/lib/narrative";
 
 // MCP server — the PRIMARY student surface. Students address everything by
 // (course, lecture number); raw session ids never leak. Tools return the
@@ -42,6 +43,44 @@ const conceptView = (c: {
   time_start: c.time_start,
   time_end: c.time_end,
 });
+
+type QuizEntry = { lecture: number; n: number; question: string; answer: string };
+
+// Pull every parseable "Check yourself:" quiz item from a lecture's stored
+// narrative — one lecture when `lecture` is given, the whole course otherwise.
+// Lectures without a narrative or without a quiz block are silently skipped.
+async function collectQuiz(
+  course: string,
+  lecture?: number,
+): Promise<{ error: string } | { items: QuizEntry[] }> {
+  let rows;
+  if (lecture !== undefined) {
+    const row = await lectureByNumber(course, lecture);
+    if (!row) return { error: "Unknown lecture" };
+    rows = [row];
+  } else {
+    rows = await courseLectures(course);
+    if (rows.length === 0) return { error: "Unknown or empty course" };
+  }
+
+  const per = await Promise.all(
+    rows.map(async (l) => {
+      const result = await getLectureNarrative(course, l.session_id).catch(() => null);
+      if (!result?.narrative) return [];
+      return splitConspect(result.narrative).quiz.map((item, i) => ({
+        lecture: l.position,
+        n: i + 1,
+        question: item.question,
+        answer: item.answer,
+      }));
+    }),
+  );
+  const items = per.flat();
+  if (items.length === 0) {
+    return { error: "No quiz available yet — the notes may still be fusing or regenerating" };
+  }
+  return { items };
+}
 
 const handler = createMcpHandler(
   (server) => {
@@ -264,6 +303,71 @@ const handler = createMcpHandler(
             kind: l.kind,
             from: title(l.from),
           })),
+        });
+      },
+    );
+    server.registerTool(
+      "get_quiz_questions",
+      {
+        title: "Quiz questions — active recall (answers withheld)",
+        description:
+          "Self-check quiz QUESTIONS for one lecture, or the whole course when `lecture` is " +
+          "omitted (exam review). Answers are deliberately withheld. Run ACTIVE RECALL: ask the " +
+          "student ONE question at a time, wait for their own attempt, and only AFTER they " +
+          "attempt it call get_quiz_answers to grade. Never reveal, guess, or look up an answer " +
+          "before the student has tried the question.",
+        inputSchema: {
+          course: z.string().describe("Course id from list_courses"),
+          lecture: z
+            .number()
+            .int()
+            .min(1)
+            .optional()
+            .describe("Lecture number from list_lectures; omit for course-wide review"),
+        },
+      },
+      async ({ course, lecture }) => {
+        const res = await collectQuiz(course, lecture);
+        if ("error" in res) return json({ error: res.error });
+        return json({
+          course,
+          lecture: lecture ?? "all",
+          total: res.items.length,
+          questions: res.items.map((it) => ({
+            lecture: it.lecture,
+            n: it.n,
+            question: it.question,
+          })),
+        });
+      },
+    );
+
+    server.registerTool(
+      "get_quiz_answers",
+      {
+        title: "Quiz answer key — for grading attempts only",
+        description:
+          "The GRADING KEY for get_quiz_questions: the same quiz items including each answer. " +
+          "Only call this AFTER the student has attempted the corresponding question — use it " +
+          "to grade their attempt and explain the gap, never to read answers out pre-emptively.",
+        inputSchema: {
+          course: z.string().describe("Course id from list_courses"),
+          lecture: z
+            .number()
+            .int()
+            .min(1)
+            .optional()
+            .describe("Lecture number from list_lectures; omit for course-wide review"),
+        },
+      },
+      async ({ course, lecture }) => {
+        const res = await collectQuiz(course, lecture);
+        if ("error" in res) return json({ error: res.error });
+        return json({
+          course,
+          lecture: lecture ?? "all",
+          total: res.items.length,
+          items: res.items,
         });
       },
     );
