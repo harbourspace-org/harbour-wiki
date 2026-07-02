@@ -204,6 +204,33 @@ export function isLive(l: LectureRow): boolean {
   return l.started_at !== null && l.finalized_at === null;
 }
 
+/**
+ * The course's known terminology: concept titles across all stored lecture
+ * notes, most recently taught first. Fed to the recorder's transcriber as a
+ * vocabulary bias — past lectures teach the STT the course's language.
+ */
+export async function courseVocabulary(courseId: string, limit = 40): Promise<string[]> {
+  const rows = await q<{ concepts: Record<string, ConceptNode> }>(
+    `SELECT concepts FROM harbour_wiki.lecture_note WHERE course_id = $1
+     ORDER BY updated_at DESC LIMIT 12`,
+    [courseId],
+  );
+  const seen = new Set<string>();
+  const titles: string[] = [];
+  for (const row of rows) {
+    for (const c of Object.values(row.concepts)) {
+      const t = c.title.trim();
+      const key = t.toLowerCase();
+      if (t && !seen.has(key)) {
+        seen.add(key);
+        titles.push(t);
+        if (titles.length >= limit) return titles;
+      }
+    }
+  }
+  return titles;
+}
+
 /** Regenerate the narrative at most this often for a live lecture. */
 const NARRATIVE_THROTTLE_MS = 45_000;
 

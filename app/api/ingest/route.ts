@@ -3,7 +3,12 @@ import { z } from "zod";
 
 import { upsertCourse } from "@/lib/courses";
 import { flush, ingest, setConfig } from "@/lib/knottra";
-import { finalizeLecture, startLecture, syncLectureNote } from "@/lib/lectures";
+import {
+  courseVocabulary,
+  finalizeLecture,
+  startLecture,
+  syncLectureNote,
+} from "@/lib/lectures";
 
 // Single gateway to Knottra for capture clients. The recorder never holds the
 // Knottra API key — it authenticates here with CAPTURE_TOKEN and announces
@@ -87,6 +92,10 @@ export async function POST(req: NextRequest) {
         session: started.session,
         lecture: started.lecture,
         resumed: started.resumed,
+        // The course's known terminology (concept titles from all lectures) —
+        // the recorder feeds it to its transcriber as a vocabulary bias, so
+        // past lectures teach the STT the course's language.
+        vocabulary: await courseVocabulary(course.id),
       });
     }
 
