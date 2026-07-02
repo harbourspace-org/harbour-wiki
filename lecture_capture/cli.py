@@ -17,7 +17,7 @@ import requests
 from dotenv import load_dotenv
 
 from .audio import MicStream
-from .config import DEFAULT_CHUNK_SECONDS, DEFAULT_MODEL, Config
+from .config import DEFAULT_MODEL, Config
 from .gateway import Gateway
 from .transcribe import Transcriber
 
@@ -65,10 +65,21 @@ def _build_config(argv: list[str] | None) -> Config:
         help="faster-whisper model size (e.g. tiny.en, base.en, small.en)",
     )
     parser.add_argument(
-        "--chunk-seconds",
+        "--max-utterance",
         type=float,
-        default=float(os.getenv("CHUNK_SECONDS", DEFAULT_CHUNK_SECONDS)),
-        help="Seconds of audio per transcription/event",
+        default=float(os.getenv("MAX_UTTERANCE_SECONDS", "12")),
+        help="Forced cut length; normally utterances end at natural pauses",
+    )
+    parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=float(os.getenv("MIN_CONFIDENCE", "0.35")),
+        help="Utterances transcribed below this confidence are not sent",
+    )
+    parser.add_argument(
+        "--context",
+        default=os.getenv("CAPTURE_CONTEXT") or None,
+        help="Vocabulary hint for the transcriber (default: built from class/lecture title)",
     )
     parser.add_argument(
         "--language",
@@ -84,6 +95,10 @@ def _build_config(argv: list[str] | None) -> Config:
     )
     args = parser.parse_args(argv)
 
+    context = args.context or " ".join(
+        p for p in ["University lecture.", args.class_title or args.class_id, args.lecture_title]
+        if p
+    )
     return Config(
         base_url=args.base_url.rstrip("/"),
         token=args.token or None,
@@ -92,9 +107,11 @@ def _build_config(argv: list[str] | None) -> Config:
         lecture_title=args.lecture_title,
         force_new=args.new_lecture,
         model_size=args.model,
-        chunk_seconds=args.chunk_seconds,
+        chunk_seconds=args.max_utterance,
         language=args.language,
         device=args.device,
+        context=context,
+        min_confidence=args.min_confidence,
     )
 
 
@@ -103,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     gateway = Gateway(cfg)
 
     print(f"[capture] loading Whisper model '{cfg.model_size}' (first run downloads it) …", flush=True)
-    transcriber = Transcriber(cfg.model_size, cfg.language)
+    transcriber = Transcriber(cfg.model_size, cfg.language, context=cfg.context)
 
     print(f"[capture] class '{cfg.class_id}' is recording — asking {cfg.base_url} …", flush=True)
     try:
@@ -125,6 +142,12 @@ def main(argv: list[str] | None = None) -> int:
                 spoken_at = datetime.now(timezone.utc)
                 transcript = transcriber.transcribe(audio)
                 if not transcript.text:
+                    continue
+                if transcript.confidence < cfg.min_confidence:
+                    print(
+                        f"[ –– ] ({transcript.confidence:.2f}) {transcript.text}  ← low confidence, not sent",
+                        flush=True,
+                    )
                     continue
                 try:
                     gateway.send_speech(transcript.text, transcript.confidence, spoken_at)

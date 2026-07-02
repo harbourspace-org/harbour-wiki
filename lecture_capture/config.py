@@ -14,7 +14,9 @@ from dataclasses import dataclass
 # faster-whisper expects 16 kHz mono float32 audio.
 SAMPLE_RATE = 16_000
 
-DEFAULT_MODEL = "base.en"
+# small.en is a large accuracy jump over base.en on accented/noisy speech and
+# still runs near-realtime on a modern laptop CPU with int8. Weak PC? tiny.en.
+DEFAULT_MODEL = "small.en"
 DEFAULT_CHUNK_SECONDS = 6.0
 
 
@@ -32,6 +34,8 @@ class Config:
     chunk_seconds: float
     language: str | None
     device: int | None  # mic input-device index; None = system default
+    context: str | None = None  # vocabulary hint fed to Whisper (initial_prompt)
+    min_confidence: float = 0.35  # utterances below this are NOT sent
 
     @property
     def ingest_url(self) -> str:

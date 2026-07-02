@@ -111,7 +111,21 @@ creates the next number. `--new-lecture` forces a fresh one.
 | `--new-lecture` | — | off | Don't resume; start the next lecture |
 | `--base-url` | `HARBOUR_WIKI_BASE_URL` | `http://127.0.0.1:3000` | Harbour.Wiki (the gateway) |
 | `--token` | `CAPTURE_TOKEN` | — | Must match the app's `CAPTURE_TOKEN` |
-| `--model` | `WHISPER_MODEL` | `base.en` | `tiny.en` fastest → `small.en` best |
-| `--chunk-seconds` | `CHUNK_SECONDS` | `6` | Audio per event; lower = snappier, more calls |
+| `--model` | `WHISPER_MODEL` | `small.en` | accuracy↑; use `tiny.en`/`base.en` on a weak PC |
+| `--max-utterance` | `MAX_UTTERANCE_SECONDS` | `12` | forced cut; normally cuts at natural pauses |
+| `--min-confidence` | `MIN_CONFIDENCE` | `0.35` | garbled utterances below this are not sent |
+| `--context` | `CAPTURE_CONTEXT` | class+lecture title | vocabulary hint (course terms) for Whisper |
 | `--language` | `WHISPER_LANGUAGE` | autodetect | e.g. `en` |
 | `--device` | `AUDIO_DEVICE` | system mic | Index from `python -m sounddevice` |
+
+## Capture quality
+
+The recorder is tuned for hard rooms: utterances are cut at natural pauses
+(never mid-word), quiet mics are auto-normalized, Whisper runs with beam
+search + a course-vocabulary hint, and its classic hallucinations (invented
+text over noise, repetition loops) are dropped by per-segment quality gates.
+Utterances still below `--min-confidence` are printed locally but NOT sent.
+
+Software can't fix physics: a laptop mic 8 m from the lecturer will always be
+poor. A $20 USB conference/lavalier mic near the speaker improves quality far
+more than any setting here. Pick the right input with `--device`.
