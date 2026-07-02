@@ -4,6 +4,10 @@ import { CourseSeed } from "@/components/CourseSeed";
 import { listCourses } from "@/lib/courses";
 import { courseLectures, isLive } from "@/lib/lectures";
 
+// Without this, Next prerenders "/" at BUILD time — no DB in the Docker build,
+// so an empty course list gets baked into static HTML. This is a live index.
+export const dynamic = "force-dynamic";
+
 export default async function Home() {
   const courses = await listCourses().catch(() => []);
   const enriched = await Promise.all(
