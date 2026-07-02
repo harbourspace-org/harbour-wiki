@@ -259,14 +259,21 @@ const handler = createMcpHandler(
   { basePath: "/api", maxDuration: 60, verboseLogs: false },
 );
 
-// Optional bearer-token gate (enforced only when MCP_BEARER_TOKEN is set).
+// Optional token gate (enforced only when MCP_BEARER_TOKEN is set). Two ways
+// to present it: the Authorization header (Claude Code / Desktop / Cursor), or
+// a ?key= query parameter — for clients that can only take a URL, like the
+// Claude.ai web connector. Proper per-student OAuth can replace this later.
 async function guarded(req: Request): Promise<Response> {
   const token = process.env.MCP_BEARER_TOKEN;
-  if (token && req.headers.get("authorization") !== `Bearer ${token}`) {
-    return new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401,
-      headers: { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" },
-    });
+  if (token) {
+    const viaHeader = req.headers.get("authorization") === `Bearer ${token}`;
+    const viaQuery = new URL(req.url).searchParams.get("key") === token;
+    if (!viaHeader && !viaQuery) {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json", "WWW-Authenticate": "Bearer" },
+      });
+    }
   }
   return handler(req);
 }
