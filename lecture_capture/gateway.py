@@ -1,12 +1,14 @@
 """HTTP client for Harbour.Wiki's ingest gateway (`POST /api/ingest`).
 
-All three operations the capture loop needs — claim the session, append speech,
-flush — go through this one endpoint. Harbour.Wiki forwards to Knottra with its
-own key; the recorder only carries the capture token.
+The lifecycle: ``start`` announces the class and receives the lecture/session
+the gateway decided on; ``send_speech`` streams chunks into that session;
+``flush`` finalizes. The recorder only carries the capture token — Harbour.Wiki
+forwards to Knottra with its own key.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 import requests
@@ -16,35 +18,55 @@ from .config import Config
 _TIMEOUT_SECONDS = 30
 
 
+@dataclass(frozen=True)
+class StartedLecture:
+    session: str
+    lecture: int
+    resumed: bool
+
+
 class Gateway:
     def __init__(self, cfg: Config) -> None:
         self._cfg = cfg
+        self._session: str | None = None
         self._headers = {"Content-Type": "application/json"}
         if cfg.token:
             self._headers["Authorization"] = f"Bearer {cfg.token}"
 
-    def _post(self, body: dict) -> None:
+    def _post(self, body: dict) -> dict:
         response = requests.post(
             self._cfg.ingest_url,
-            json={"session": self._cfg.session_id, **body},
+            json=body,
             headers=self._headers,
             timeout=_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
+        return response.json()
 
-    def ensure_session(self) -> None:
-        """Create/claim the session, set its config, and register it as a course."""
-        self._post(
-            {
-                "domainPrompt": self._cfg.domain_prompt,
-                "course": {"id": self._cfg.course_id, "title": self._cfg.course_title},
-                "label": self._cfg.label,
-            }
+    def start(self) -> StartedLecture:
+        """Announce 'class X is recording now'; the gateway picks the lecture."""
+        course: dict = {"id": self._cfg.class_id}
+        if self._cfg.class_title:
+            course["title"] = self._cfg.class_title
+        body: dict = {"action": "start", "course": course}
+        if self._cfg.lecture_title:
+            body["lectureTitle"] = self._cfg.lecture_title
+        if self._cfg.force_new:
+            body["forceNew"] = True
+        data = self._post(body)
+        self._session = data["session"]
+        return StartedLecture(
+            session=data["session"],
+            lecture=int(data["lecture"]),
+            resumed=bool(data.get("resumed")),
         )
 
     def send_speech(self, content: str, confidence: float, when: datetime) -> None:
+        if self._session is None:
+            raise RuntimeError("Gateway.start() must succeed before sending speech")
         self._post(
             {
+                "session": self._session,
                 "events": [
                     {
                         "timestamp": when.isoformat(),
@@ -52,9 +74,11 @@ class Gateway:
                         "content": content,
                         "confidence": round(confidence, 3),
                     }
-                ]
+                ],
             }
         )
 
     def flush(self) -> None:
-        self._post({"flush": True})
+        if self._session is None:
+            return
+        self._post({"session": self._session, "flush": True})

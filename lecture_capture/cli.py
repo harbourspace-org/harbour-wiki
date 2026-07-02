@@ -1,8 +1,9 @@
 """Entry point: mic → local Whisper → Harbour.Wiki → Knottra, flush on exit.
 
-Records the microphone in fixed chunks, transcribes each locally, and posts it
-as a ``speech`` event to Harbour.Wiki's ingest gateway (which forwards to
-Knottra). Ctrl+C stops cleanly and flushes so the trailing window gets fused.
+The operator announces only the CLASS being recorded; the gateway decides the
+lecture (resume-or-create, auto-numbered) and returns the session. Chunks are
+transcribed locally and streamed as ``speech`` events; Ctrl+C stops cleanly
+and flushes so the trailing window gets fused and the lecture is finalized.
 """
 
 from __future__ import annotations
@@ -16,12 +17,7 @@ import requests
 from dotenv import load_dotenv
 
 from .audio import MicStream
-from .config import (
-    DEFAULT_CHUNK_SECONDS,
-    DEFAULT_DOMAIN_PROMPT,
-    DEFAULT_MODEL,
-    Config,
-)
+from .config import DEFAULT_CHUNK_SECONDS, DEFAULT_MODEL, Config
 from .gateway import Gateway
 from .transcribe import Transcriber
 
@@ -30,9 +26,29 @@ def _build_config(argv: list[str] | None) -> Config:
     load_dotenv()
     parser = argparse.ArgumentParser(
         prog="lecture-capture",
-        description="Record a lecture and stream transcribed speech into Harbour.Wiki.",
+        description="Record the class happening now and stream its notes into Harbour.Wiki.",
     )
-    parser.add_argument("--session", required=True, help="Session id (the lecture id)")
+    parser.add_argument(
+        "--class",
+        dest="class_id",
+        required=True,
+        help="Course id being recorded now (e.g. algorithms-2026)",
+    )
+    parser.add_argument(
+        "--class-title",
+        default=os.getenv("CAPTURE_CLASS_TITLE") or None,
+        help="Human title for the course (used when the course is first created)",
+    )
+    parser.add_argument(
+        "--lecture-title",
+        default=None,
+        help="Optional title for today's lecture (default: 'Lecture N')",
+    )
+    parser.add_argument(
+        "--new-lecture",
+        action="store_true",
+        help="Force a new lecture even if a recent one could be resumed",
+    )
     parser.add_argument(
         "--base-url",
         default=os.getenv("HARBOUR_WIKI_BASE_URL", "http://127.0.0.1:3000"),
@@ -42,26 +58,6 @@ def _build_config(argv: list[str] | None) -> Config:
         "--token",
         default=os.getenv("CAPTURE_TOKEN", ""),
         help="Capture token for Harbour.Wiki's /api/ingest (env CAPTURE_TOKEN)",
-    )
-    parser.add_argument(
-        "--domain-prompt",
-        default=os.getenv("CAPTURE_DOMAIN_PROMPT", DEFAULT_DOMAIN_PROMPT),
-        help="Fusion guidance for this session",
-    )
-    parser.add_argument(
-        "--course",
-        default=os.getenv("CAPTURE_COURSE", ""),
-        help="Course id to file this lecture under (default: the session id)",
-    )
-    parser.add_argument(
-        "--course-title",
-        default=os.getenv("CAPTURE_COURSE_TITLE", ""),
-        help="Human title for the course (default: the course id)",
-    )
-    parser.add_argument(
-        "--label",
-        default=os.getenv("CAPTURE_LABEL", "Live capture"),
-        help="Label for this lecture within the course",
     )
     parser.add_argument(
         "--model",
@@ -88,15 +84,13 @@ def _build_config(argv: list[str] | None) -> Config:
     )
     args = parser.parse_args(argv)
 
-    course_id = args.course or args.session
     return Config(
         base_url=args.base_url.rstrip("/"),
         token=args.token or None,
-        session_id=args.session,
-        domain_prompt=args.domain_prompt,
-        course_id=course_id,
-        course_title=args.course_title or course_id,
-        label=args.label,
+        class_id=args.class_id,
+        class_title=args.class_title,
+        lecture_title=args.lecture_title,
+        force_new=args.new_lecture,
         model_size=args.model,
         chunk_seconds=args.chunk_seconds,
         language=args.language,
@@ -111,12 +105,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[capture] loading Whisper model '{cfg.model_size}' (first run downloads it) …", flush=True)
     transcriber = Transcriber(cfg.model_size, cfg.language)
 
-    print(f"[capture] claiming session '{cfg.session_id}' via {cfg.base_url} …", flush=True)
+    print(f"[capture] class '{cfg.class_id}' is recording — asking {cfg.base_url} …", flush=True)
     try:
-        gateway.ensure_session()
+        started = gateway.start()
     except requests.RequestException as error:
         print(f"[capture] could not reach Harbour.Wiki: {error}", file=sys.stderr, flush=True)
         return 1
+    verb = "resuming" if started.resumed else "starting"
+    print(
+        f"[capture] {verb} lecture #{started.lecture} (session {started.session})",
+        flush=True,
+    )
 
     print("[capture] recording — speak into the mic. Ctrl+C to stop & flush.", flush=True)
     events = 0
@@ -139,8 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         gateway.flush()
         print(
-            f"[capture] flushed session '{cfg.session_id}' ({events} events). "
-            "Fusion runs in the background — open the wiki.",
+            f"[capture] lecture #{started.lecture} of '{cfg.class_id}' finalized "
+            f"({events} events). Fusion finishes in the background — the notes are in the wiki.",
             flush=True,
         )
     except requests.RequestException as error:

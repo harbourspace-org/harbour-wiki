@@ -42,10 +42,10 @@ python -m venv .venv && source .venv/bin/activate && pip install -e .
 
 ```bash
 # with uv:
-uv run lecture-capture --session cs101-lecture-3
+uv run lecture-capture --class algorithms-2026
 
 # …or, in the activated venv:
-lecture-capture --session cs101-lecture-3
+lecture-capture --class algorithms-2026 --lecture-title "Hashing"
 ```
 
 Speak into the mic. Each chunk prints as it's sent:
@@ -57,14 +57,21 @@ Speak into the mic. Each chunk prints as it's sent:
 ```
 
 `Ctrl+C` stops and flushes. Then open the lecture in the wiki:
-`https://harbour-wiki-production.up.railway.app/wiki/cs101-lecture-3`
-(or query it from Claude.ai via the MCP endpoint).
+`https://harbour-wiki-production.up.railway.app/course/algorithms-2026`
+(or query it from Claude via the MCP endpoint).
+
+You announce only the **class** — Harbour.Wiki decides the lecture: it resumes
+the current one (started <3h ago, not finalized — recorder crash-safe) or
+creates the next number. `--new-lecture` forces a fresh one.
 
 ## Options
 
 | Flag | Env | Default | Notes |
 |---|---|---|---|
-| `--session` | — | *(required)* | Lecture / session id |
+| `--class` | — | *(required)* | Course id being recorded now |
+| `--class-title` | `CAPTURE_CLASS_TITLE` | = class id | Course title (first creation) |
+| `--lecture-title` | — | `Lecture N` | Title for today's lecture |
+| `--new-lecture` | — | off | Don't resume; start the next lecture |
 | `--base-url` | `HARBOUR_WIKI_BASE_URL` | `http://127.0.0.1:3000` | Harbour.Wiki (the gateway) |
 | `--token` | `CAPTURE_TOKEN` | — | Must match the app's `CAPTURE_TOKEN` |
 | `--model` | `WHISPER_MODEL` | `base.en` | `tiny.en` fastest → `small.en` best |

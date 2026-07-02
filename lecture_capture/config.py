@@ -1,9 +1,10 @@
 """Runtime configuration for the lecture capture client.
 
-The recorder talks ONLY to Harbour.Wiki (the single gateway to Knottra) — it
-never holds the Knottra API key. It authenticates to the app with a capture
-token. Values come from CLI flags, falling back to environment (and a local
-.env); secrets are never hard-coded.
+The operator announces only "class X is recording now" — Harbour.Wiki (the
+single gateway to Knottra) decides which lecture that is, which session backs
+it, and where the notes live. The recorder never holds the Knottra key; it
+authenticates to the app with a capture token. Values come from CLI flags,
+falling back to environment (and a local .env); secrets are never hard-coded.
 """
 
 from __future__ import annotations
@@ -15,10 +16,6 @@ SAMPLE_RATE = 16_000
 
 DEFAULT_MODEL = "base.en"
 DEFAULT_CHUNK_SECONDS = 6.0
-DEFAULT_DOMAIN_PROMPT = (
-    "This is a university lecture. Group the speech into the concepts being "
-    "taught, each with its sub-points and the logical flow between concepts."
-)
 
 
 @dataclass(frozen=True)
@@ -27,11 +24,10 @@ class Config:
 
     base_url: str  # Harbour.Wiki base URL (the gateway)
     token: str | None  # capture Bearer token; may be empty for open/local dev
-    session_id: str
-    domain_prompt: str
-    course_id: str  # registers the lecture in the wiki course index (MCP search)
-    course_title: str
-    label: str
+    class_id: str  # the course being recorded ("class X is recording now")
+    class_title: str | None
+    lecture_title: str | None
+    force_new: bool  # start a new lecture even if one is resumable
     model_size: str
     chunk_seconds: float
     language: str | None
