@@ -76,6 +76,17 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
               </ul>
             </div>
           )}
+          {conspect && conspect.quiz.length > 0 && (
+            <div className="selfcheck">
+              <span className="selfcheck-label">Check yourself</span>
+              {conspect.quiz.map((q, i) => (
+                <details key={i}>
+                  <summary>{q.question}</summary>
+                  <p>{q.answer}</p>
+                </details>
+              ))}
+            </div>
+          )}
           {conspect && (
             <details style={{ margin: "0.4rem 0 0.8rem" }}>
               <summary style={{ cursor: "pointer" }}>

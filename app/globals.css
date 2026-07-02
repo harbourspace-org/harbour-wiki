@@ -247,6 +247,29 @@ li { margin: 0.2em 0; }
 .takeaways ul { margin: 0 0 0 1.25em; }
 .takeaways li { margin: 0.18em 0; }
 
+/* ---------- lecture self-check quiz ---------- */
+.selfcheck {
+  margin: 0.5rem 0 0.8rem;
+  padding: 0.6rem 0.9rem 0.7rem;
+  background: var(--box);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--link);
+  font-size: 0.95rem;
+}
+.selfcheck-label {
+  display: block;
+  font-variant: small-caps;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--text-soft);
+  margin-bottom: 0.25rem;
+}
+.selfcheck details { margin: 0.18em 0; }
+.selfcheck summary { cursor: pointer; }
+.selfcheck summary:hover { color: var(--link); }
+.selfcheck details p { margin: 0.3em 0 0.4em 1.1em; color: var(--text-soft); }
+
 /* ---------- footer note ---------- */
 .footnote {
   margin-top: 3rem;
