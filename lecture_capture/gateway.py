@@ -23,6 +23,7 @@ class StartedLecture:
     session: str
     lecture: int
     resumed: bool
+    vocabulary: tuple[str, ...] = ()
 
 
 class Gateway:
@@ -43,8 +44,12 @@ class Gateway:
         response.raise_for_status()
         return response.json()
 
-    def start(self) -> StartedLecture:
-        """Announce 'class X is recording now'; the gateway picks the lecture."""
+    def start(self, adopt_session: bool = True) -> StartedLecture:
+        """Announce 'class X is recording now'; the gateway picks the lecture.
+
+        ``adopt_session=False`` is for mid-run vocabulary refreshes: use the
+        response's vocabulary but never switch which session we stream into.
+        """
         course: dict = {"id": self._cfg.class_id}
         if self._cfg.class_title:
             course["title"] = self._cfg.class_title
@@ -54,11 +59,13 @@ class Gateway:
         if self._cfg.force_new:
             body["forceNew"] = True
         data = self._post(body)
-        self._session = data["session"]
+        if adopt_session or self._session is None:
+            self._session = data["session"]
         return StartedLecture(
             session=data["session"],
             lecture=int(data["lecture"]),
             resumed=bool(data.get("resumed")),
+            vocabulary=tuple(data.get("vocabulary") or []),
         )
 
     def send_speech(self, content: str, confidence: float, when: datetime) -> None:

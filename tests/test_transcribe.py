@@ -60,3 +60,24 @@ class TestNormalize:
         # Boosting an empty room's noise floor would feed hallucinations.
         silence = np.full(1600, 0.0005, np.float32)
         assert np.array_equal(normalize_audio(silence), silence)
+
+
+class TestBuildContext:
+    def test_topic_plus_vocabulary(self):
+        from lecture_capture.transcribe import build_context
+
+        ctx = build_context("Algorithms lecture.", ["Dijkstra's Algorithm", "Hash Tables"])
+        assert ctx is not None and ctx.startswith("Algorithms lecture.")
+        assert "Dijkstra's Algorithm" in ctx and "Hash Tables" in ctx
+
+    def test_truncated_to_prompt_window(self):
+        from lecture_capture.transcribe import MAX_CONTEXT_CHARS, build_context
+
+        ctx = build_context("t", [f"Concept {i}" for i in range(500)])
+        assert ctx is not None and len(ctx) <= MAX_CONTEXT_CHARS
+
+    def test_empty_is_none(self):
+        from lecture_capture.transcribe import build_context
+
+        assert build_context(None, []) is None
+        assert build_context("  ", ()) is None

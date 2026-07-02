@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -19,7 +20,7 @@ from dotenv import load_dotenv
 from .audio import MicStream
 from .config import DEFAULT_MODEL, Config
 from .gateway import Gateway
-from .transcribe import Transcriber
+from .transcribe import Transcriber, build_context
 
 
 def _build_config(argv: list[str] | None) -> Config:
@@ -133,13 +134,31 @@ def main(argv: list[str] | None = None) -> int:
         f"[capture] {verb} lecture #{started.lecture} (session {started.session})",
         flush=True,
     )
+    if started.vocabulary:
+        transcriber.set_context(build_context(cfg.context, started.vocabulary))
+        print(
+            f"[capture] transcriber primed with {len(started.vocabulary)} course terms "
+            f"(e.g. {', '.join(started.vocabulary[:3])})",
+            flush=True,
+        )
 
     print("[capture] recording — speak into the mic. Ctrl+C to stop & flush.", flush=True)
     events = 0
+    VOCAB_REFRESH_SECONDS = 300  # today's own concepts join the bias as fusion runs
+    last_vocab_refresh = time.monotonic()
     try:
         with MicStream(cfg.chunk_seconds, cfg.device) as mic:
             for audio in mic.chunks():
                 spoken_at = datetime.now(timezone.utc)
+                if time.monotonic() - last_vocab_refresh > VOCAB_REFRESH_SECONDS:
+                    last_vocab_refresh = time.monotonic()
+                    try:
+                        # Vocabulary only — never adopt a different session.
+                        refreshed = gateway.start(adopt_session=False)
+                        if refreshed.vocabulary:
+                            transcriber.set_context(build_context(cfg.context, refreshed.vocabulary))
+                    except requests.RequestException:
+                        pass  # keep recording; retry at the next interval
                 transcript = transcriber.transcribe(audio)
                 if not transcript.text:
                     continue

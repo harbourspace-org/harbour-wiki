@@ -23,6 +23,20 @@ MIN_AVG_LOGPROB = -1.0  # model was guessing
 MAX_COMPRESSION_RATIO = 2.4  # repetition loops compress suspiciously well
 
 
+MAX_CONTEXT_CHARS = 700  # whisper's initial_prompt window is ~224 tokens
+
+
+def build_context(topic: str | None, vocabulary: tuple[str, ...] | list[str]) -> str | None:
+    """Compose the transcriber's vocabulary bias: lesson topic + course terms."""
+    parts: list[str] = []
+    if topic and topic.strip():
+        parts.append(topic.strip())
+    if vocabulary:
+        parts.append("Key terms: " + ", ".join(v.strip() for v in vocabulary if v.strip()) + ".")
+    text = " ".join(parts).strip()
+    return text[:MAX_CONTEXT_CHARS] or None
+
+
 @dataclass(frozen=True)
 class Transcript:
     text: str
@@ -86,6 +100,10 @@ class Transcriber:
         self._language = language
         # Vocabulary bias: course/lecture topic words dramatically help
         # domain terms survive a noisy signal.
+        self._context = (context or "").strip() or None
+
+    def set_context(self, context: str | None) -> None:
+        """Swap the vocabulary bias mid-run (course terms grow as fusion runs)."""
         self._context = (context or "").strip() or None
 
     def transcribe(self, audio: np.ndarray) -> Transcript:
