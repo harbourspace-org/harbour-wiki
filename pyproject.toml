@@ -23,3 +23,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["lecture_capture"]
+
+[dependency-groups]
+dev = ["pytest>=8.3"]

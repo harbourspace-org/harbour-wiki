@@ -48,6 +48,11 @@ def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
     parser.add_argument("--preview", action="store_true", help="Show a live window (useful for aiming; q quits)")
     parser.add_argument("--poll", type=float, default=0.5, help="Seconds between frame checks")
     parser.add_argument("--min-send", type=float, default=20.0, help="Minimum seconds between shipped frames")
+    parser.add_argument(
+        "--test-frame",
+        action="store_true",
+        help="No camera: ship one synthetic whiteboard frame and exit (validates the whole path)",
+    )
     args = parser.parse_args(argv)
 
     cfg = Config(
@@ -73,11 +78,11 @@ def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
         tilt=args.tilt,
         zoom=args.zoom,
     )
-    return cfg, opts
+    return cfg, opts, bool(args.test_frame)
 
 
 def main(argv: list[str] | None = None) -> int:
-    cfg, opts = _build(argv)
+    cfg, opts, test_frame = _build(argv)
     gateway = Gateway(cfg)
 
     print(f"[camera] class '{cfg.class_id}' — asking {cfg.base_url} …", flush=True)
@@ -88,6 +93,22 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     verb = "joining live" if started.resumed else "starting"
     print(f"[camera] {verb} lecture #{started.lecture} (session {started.session})", flush=True)
+
+    if test_frame:
+        from .camera import encode_jpeg_b64, make_test_board
+
+        print("[camera] shipping one synthetic test frame …", flush=True)
+        result = gateway.send_frame(
+            encode_jpeg_b64(make_test_board()), opts.modality, datetime.now(timezone.utc)
+        )
+        print(f"[camera] server said: {result}", flush=True)
+        print(
+            f"[camera] check the lecture in the wiki — the drawn text should appear as a "
+            f"'{opts.modality}' event after fusion.",
+            flush=True,
+        )
+        return 0
+
     print(
         f"[camera] watching '{opts.modality}' on device {opts.device} — ships a frame when the "
         "scene is stable AND changed. Ctrl+C to stop.",
