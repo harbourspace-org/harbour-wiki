@@ -30,6 +30,9 @@ export type LectureNote = {
   cursor: number;
   concepts: ConceptNode[]; // sorted by created_at_seq (lecture order)
   links: ConceptLink[];
+  narrative: string | null; // the LLM-written, timestamped story of the lecture
+  narrativeCursor: number; // record cursor the narrative was written at
+  narrativeAt: string | null;
 };
 
 export function sessionIdFor(courseId: string, lecture: number): string {
@@ -105,6 +108,9 @@ type NoteRow = {
   concepts: Record<string, ConceptNode>;
   links: Record<string, ConceptLink>;
   updated_at: string;
+  narrative: string | null;
+  narrative_cursor: string;
+  narrative_at: string | null;
 };
 
 function toNote(row: NoteRow): LectureNote {
@@ -117,6 +123,9 @@ function toNote(row: NoteRow): LectureNote {
     cursor: Number(row.cursor),
     concepts,
     links: Object.values(row.links),
+    narrative: row.narrative ?? null,
+    narrativeCursor: Number(row.narrative_cursor ?? 0),
+    narrativeAt: row.narrative_at ?? null,
   };
 }
 
@@ -193,4 +202,42 @@ export async function getLectureNote(
 /** True while the lecture is being captured (started, not finalized). */
 export function isLive(l: LectureRow): boolean {
   return l.started_at !== null && l.finalized_at === null;
+}
+
+/** Regenerate the narrative at most this often for a live lecture. */
+const NARRATIVE_THROTTLE_MS = 45_000;
+
+/**
+ * The whole-lecture story: LLM-rewritten, timestamped prose covering the
+ * record up to its cursor. Regenerated lazily when the record has moved past
+ * what the narrative covers (throttled — live polls shouldn't stampede the LLM).
+ */
+export async function getLectureNarrative(
+  courseId: string,
+  session: string,
+): Promise<{ narrative: string | null; note: LectureNote } | null> {
+  // Import here: narrative.ts type-imports from this module (no runtime cycle).
+  const { writeNarrative } = await import("./narrative");
+
+  const note = await getLectureNote(courseId, session);
+  if (!note) return null;
+
+  const covered = note.narrative !== null && note.narrativeCursor >= note.cursor;
+  const throttled =
+    note.narrativeAt !== null &&
+    Date.now() - new Date(note.narrativeAt).getTime() < NARRATIVE_THROTTLE_MS;
+  if (covered || (note.narrative !== null && throttled)) {
+    return { narrative: note.narrative, note };
+  }
+
+  const text = await writeNarrative(note).catch(() => null);
+  if (text === null) return { narrative: note.narrative, note };
+
+  await q(
+    `UPDATE harbour_wiki.lecture_note
+     SET narrative = $2, narrative_cursor = $3, narrative_at = now()
+     WHERE session_id = $1`,
+    [session, text, note.cursor],
+  );
+  return { narrative: text, note };
 }

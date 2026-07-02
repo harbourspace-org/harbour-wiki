@@ -63,6 +63,14 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
             {lec.number}. {lec.label}
             {lec.live && <span className="live-badge">LIVE</span>}
           </h2>
+          {lec.narrative && (
+            <details style={{ margin: "0.4rem 0 0.8rem" }}>
+              <summary style={{ cursor: "pointer" }}>
+                Lecture story <span className="muted">(timestamped conspect)</span>
+              </summary>
+              <p style={{ whiteSpace: "pre-wrap", marginTop: "0.5rem" }}>{lec.narrative}</p>
+            </details>
+          )}
           {lec.concepts.length === 0 ? (
             <p className="muted">Nothing structured yet{lec.live ? " — the lecture just started." : "."}</p>
           ) : (

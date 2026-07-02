@@ -21,6 +21,7 @@ export type Lecture = {
   number: number;
   label: string;
   live: boolean;
+  narrative: string | null;
   concepts: AggConcept[];
 };
 
@@ -65,6 +66,7 @@ export async function buildCourseGraph(courseId: string): Promise<CourseGraph | 
       number: row.position,
       label,
       live: isLive(row),
+      narrative: note?.narrative ?? null,
       concepts,
     });
     for (const link of note?.links ?? []) {

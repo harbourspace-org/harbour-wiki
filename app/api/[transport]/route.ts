@@ -6,6 +6,7 @@ import { listCourses } from "@/lib/courses";
 import { getRecord, searchRecord } from "@/lib/knottra";
 import {
   courseLectures,
+  getLectureNarrative,
   getLectureNote,
   isLive,
   lectureByNumber,
@@ -28,12 +29,18 @@ const conceptView = (c: {
   detail: string | null;
   sub_points: { text: string }[];
   modalities: string[];
+  time_start: string;
+  time_end: string;
 }) => ({
   concept_id: c.id,
   title: c.title,
   detail: c.detail,
   sub_points: c.sub_points.map((sp) => sp.text),
   modalities: c.modalities,
+  // Wall-clock span this concept was taught in — lets the client answer
+  // "what happened 10 minutes ago?" style questions.
+  time_start: c.time_start,
+  time_end: c.time_end,
 });
 
 const handler = createMcpHandler(
@@ -96,11 +103,14 @@ const handler = createMcpHandler(
     server.registerTool(
       "get_lecture",
       {
-        title: "Get a lecture's notes",
+        title: "Get a lecture — narrative + structured notes",
         description:
-          "The full structured notes of one lecture (all concepts fused so far, with sub-points " +
-          "and links). For a LIVE lecture this is the near-real-time state. The returned `cursor` " +
-          "can be passed to get_lecture_updates to poll for what comes next.",
+          "The WHOLE lecture context: a timestamped prose narrative of everything taught so far " +
+          "(the rewritten conspect), plus the structured concepts (each with its wall-clock time " +
+          "span, sub-points, links). For a LIVE lecture this is the near-real-time state. Use the " +
+          "narrative for overview/catch-up answers and the concepts + timestamps for precise or " +
+          "'what happened at/around time X' questions. Pass `cursor` to get_lecture_updates to " +
+          "poll for what comes next.",
         inputSchema: {
           course: z.string(),
           lecture: z.number().int().min(1).describe("Lecture number from list_lectures"),
@@ -109,14 +119,17 @@ const handler = createMcpHandler(
       async ({ course, lecture }) => {
         const row = await lectureByNumber(course, lecture);
         if (!row) return json({ error: "Unknown lecture" });
-        const note = await getLectureNote(course, row.session_id);
-        if (!note) return json({ error: "No notes yet — nothing fused for this lecture" });
+        const result = await getLectureNarrative(course, row.session_id);
+        if (!result) return json({ error: "No notes yet — nothing fused for this lecture" });
+        const { narrative, note } = result;
         return json({
           course,
           lecture,
           title: row.label,
           live: isLive(row),
+          started_at: row.started_at,
           cursor: note.cursor,
+          narrative: narrative ?? "(narrative not generated yet)",
           concepts: note.concepts.map(conceptView),
           links: note.links.map((l) => ({ from: l.from_concept, to: l.to_concept, kind: l.kind })),
         });

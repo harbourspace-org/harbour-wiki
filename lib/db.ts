@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS harbour_wiki.lecture_note (
   links jsonb NOT NULL DEFAULT '{}'::jsonb,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+-- The LLM-rewritten whole-lecture story (timestamped prose conspect).
+ALTER TABLE harbour_wiki.lecture_note ADD COLUMN IF NOT EXISTS narrative text;
+ALTER TABLE harbour_wiki.lecture_note ADD COLUMN IF NOT EXISTS narrative_cursor bigint NOT NULL DEFAULT 0;
+ALTER TABLE harbour_wiki.lecture_note ADD COLUMN IF NOT EXISTS narrative_at timestamptz;
 CREATE INDEX IF NOT EXISTS ix_lecture_note_course ON harbour_wiki.lecture_note (course_id);
 CREATE TABLE IF NOT EXISTS harbour_wiki.annotation (
   id text PRIMARY KEY,
