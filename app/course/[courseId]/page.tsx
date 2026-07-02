@@ -66,7 +66,7 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
           {lec.narrative && (
             <details style={{ margin: "0.4rem 0 0.8rem" }}>
               <summary style={{ cursor: "pointer" }}>
-                Lecture story <span className="muted">(timestamped conspect)</span>
+                Lecture conspect <span className="muted">(timestamped)</span>
               </summary>
               <p style={{ whiteSpace: "pre-wrap", marginTop: "0.5rem" }}>{lec.narrative}</p>
             </details>
