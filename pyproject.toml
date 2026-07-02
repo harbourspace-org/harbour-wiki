@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 lecture-capture = "lecture_capture.cli:main"
+lecture-simulate = "lecture_capture.simulate:main"
 
 [build-system]
 requires = ["hatchling"]
