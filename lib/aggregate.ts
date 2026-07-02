@@ -1,10 +1,12 @@
-// Weave a whole course's lectures into one linked graph: union of each
-// session's Knottra record (intra-lecture links) + student-authored cross-lecture
-// links, with an outgoing/backlink index.
+// Weave a whole course's lectures into one linked graph — read from the WIKI
+// STORE (harbour_wiki.lecture_note), the permanent Obsidian+Wikipedia layer.
+// Live lectures re-sync from Knottra inside getLectureNote; finalized ones are
+// served straight from the store. Student-authored cross-lecture links are
+// merged in, with an outgoing/backlink index.
 
 import { listUserLinks } from "./annotations";
-import { courseSessions, getCourse, type Course } from "./courses";
-import { getRecord } from "./knottra";
+import { getCourse, type Course } from "./courses";
+import { courseLectures, getLectureNote, isLive } from "./lectures";
 import type { ConceptNode } from "./types";
 
 export type AggConcept = ConceptNode & { sessionId: string; lecture: string };
@@ -14,7 +16,13 @@ export type AggLink = {
   kind: string;
   source: "knottra" | "student";
 };
-export type Lecture = { sessionId: string; label: string; concepts: AggConcept[] };
+export type Lecture = {
+  sessionId: string;
+  number: number;
+  label: string;
+  live: boolean;
+  concepts: AggConcept[];
+};
 
 export type CourseGraph = {
   course: Course;
@@ -28,9 +36,9 @@ export async function buildCourseGraph(courseId: string): Promise<CourseGraph | 
   const course = await getCourse(courseId);
   if (!course) return null;
 
-  const sessions = await courseSessions(courseId);
-  const records = await Promise.all(
-    sessions.map((s) => getRecord(s.session_id).catch(() => null)),
+  const rows = await courseLectures(courseId);
+  const notes = await Promise.all(
+    rows.map((l) => getLectureNote(courseId, l.session_id).catch(() => null)),
   );
 
   const lectures: Lecture[] = [];
@@ -43,21 +51,23 @@ export async function buildCourseGraph(courseId: string): Promise<CourseGraph | 
     (backlinks.get(l.to) ?? backlinks.set(l.to, []).get(l.to)!).push(l);
   };
 
-  sessions.forEach((s, i) => {
-    const rec = records[i];
-    const label = s.label || s.session_id;
-    if (!rec) {
-      lectures.push({ sessionId: s.session_id, label, concepts: [] });
-      return;
-    }
-    const concepts: AggConcept[] = rec.concepts.map((c) => ({
+  rows.forEach((row, i) => {
+    const note = notes[i];
+    const label = row.label || row.session_id;
+    const concepts: AggConcept[] = (note?.concepts ?? []).map((c) => ({
       ...c,
-      sessionId: s.session_id,
+      sessionId: row.session_id,
       lecture: label,
     }));
     concepts.forEach((c) => conceptsById.set(c.id, c));
-    lectures.push({ sessionId: s.session_id, label, concepts });
-    for (const link of rec.links) {
+    lectures.push({
+      sessionId: row.session_id,
+      number: row.position,
+      label,
+      live: isLive(row),
+      concepts,
+    });
+    for (const link of note?.links ?? []) {
       addLink({ from: link.from_concept, to: link.to_concept, kind: link.kind, source: "knottra" });
     }
   });

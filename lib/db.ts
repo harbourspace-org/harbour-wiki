@@ -32,6 +32,19 @@ CREATE TABLE IF NOT EXISTS harbour_wiki.course_session (
   label text,
   PRIMARY KEY (course_id, session_id)
 );
+ALTER TABLE harbour_wiki.course_session ADD COLUMN IF NOT EXISTS started_at timestamptz;
+ALTER TABLE harbour_wiki.course_session ADD COLUMN IF NOT EXISTS finalized_at timestamptz;
+-- The materialized wiki store: the lecture's notes, KEPT here permanently
+-- (the Obsidian+Wikipedia layer). Synced from Knottra deltas while LIVE.
+CREATE TABLE IF NOT EXISTS harbour_wiki.lecture_note (
+  session_id text PRIMARY KEY,
+  course_id text NOT NULL,
+  cursor bigint NOT NULL DEFAULT 0,
+  concepts jsonb NOT NULL DEFAULT '{}'::jsonb,
+  links jsonb NOT NULL DEFAULT '{}'::jsonb,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_lecture_note_course ON harbour_wiki.lecture_note (course_id);
 CREATE TABLE IF NOT EXISTS harbour_wiki.annotation (
   id text PRIMARY KEY,
   course_id text NOT NULL,
