@@ -77,6 +77,15 @@ export function splitConspect(narrative: string): {
   return { body: lines.slice(0, at).join("\n").trimEnd(), takeaways, quiz };
 }
 
+/**
+ * A narrative written before the "Check yourself:" quiz format shipped has no
+ * parseable quiz block. Such conspects are treated as format-stale so the
+ * self-heal loop regenerates them once with the current format.
+ */
+export function isLegacyConspect(narrative: string): boolean {
+  return splitConspect(narrative).quiz.length === 0;
+}
+
 /** Peel the trailing "Check yourself:" block off a narrative, parsing its
  * consecutive Q:/A: pairs. Unpaired Q or A lines are dropped. */
 function splitQuiz(narrative: string): { rest: string; quiz: QuizItem[] } {

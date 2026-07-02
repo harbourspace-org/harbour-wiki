@@ -244,12 +244,18 @@ export async function getLectureNarrative(
   session: string,
 ): Promise<{ narrative: string | null; note: LectureNote } | null> {
   // Import here: narrative.ts type-imports from this module (no runtime cycle).
-  const { writeNarrative } = await import("./narrative");
+  const { isLegacyConspect, writeNarrative } = await import("./narrative");
 
   const note = await getLectureNote(courseId, session);
   if (!note) return null;
 
-  const covered = note.narrative !== null && note.narrativeCursor >= note.cursor;
+  // A narrative that predates the "Check yourself:" quiz format is treated as
+  // stale so it regenerates once; the narrativeAt throttle below still gates
+  // retries, so page views cannot stampede the LLM.
+  const covered =
+    note.narrative !== null &&
+    note.narrativeCursor >= note.cursor &&
+    !isLegacyConspect(note.narrative);
   const throttled =
     note.narrativeAt !== null &&
     Date.now() - new Date(note.narrativeAt).getTime() < NARRATIVE_THROTTLE_MS;
