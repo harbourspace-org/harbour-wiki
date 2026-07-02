@@ -9,11 +9,13 @@ dependencies = [
     "numpy>=1.24",
     "requests>=2.31",
     "python-dotenv>=1.0",
+    "opencv-python>=4.9",
 ]
 
 [project.scripts]
 lecture-capture = "lecture_capture.cli:main"
 lecture-simulate = "lecture_capture.simulate:main"
+lecture-camera = "lecture_capture.camera_cli:main"
 
 [build-system]
 requires = ["hatchling"]

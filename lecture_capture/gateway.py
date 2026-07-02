@@ -78,6 +78,25 @@ class Gateway:
             }
         )
 
+    def send_frame(self, image_b64: str, modality: str, when: datetime) -> dict:
+        """Ship a camera frame to /api/vision; the server extracts its text and
+        ingests it into this session. Returns the server's summary."""
+        if self._session is None:
+            raise RuntimeError("Gateway.start() must succeed before sending frames")
+        response = requests.post(
+            f"{self._cfg.base_url}/api/vision",
+            json={
+                "session": self._session,
+                "modality": modality,
+                "image": image_b64,
+                "timestamp": when.isoformat(),
+            },
+            headers=self._headers,
+            timeout=90,  # vision extraction is slower than ingest
+        )
+        response.raise_for_status()
+        return response.json()
+
     def flush(self) -> None:
         if self._session is None:
             return

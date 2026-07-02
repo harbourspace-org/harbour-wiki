@@ -1,0 +1,111 @@
+"""Entry point for the camera agent: PTZ camera → new board content → text events.
+
+Run it ALONGSIDE the audio recorder for the same class: its start call resumes
+the same live lecture, so speech and board fuse into one record.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from datetime import datetime, timezone
+
+import requests
+from dotenv import load_dotenv
+
+from .camera import CameraOptions, run_agent
+from .config import Config, DEFAULT_CHUNK_SECONDS
+from .gateway import Gateway
+
+
+def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
+    load_dotenv()
+    parser = argparse.ArgumentParser(
+        prog="lecture-camera",
+        description="Watch the lecture room with a (PTZ) camera and stream board/slide text into Harbour.Wiki.",
+    )
+    parser.add_argument("--class", dest="class_id", required=True, help="Course id being recorded now")
+    parser.add_argument("--class-title", default=os.getenv("CAPTURE_CLASS_TITLE") or None)
+    parser.add_argument("--lecture-title", default=None, help="Used only if this starts the lecture")
+    parser.add_argument(
+        "--base-url",
+        default=os.getenv("HARBOUR_WIKI_BASE_URL", "http://127.0.0.1:3000"),
+        help="Harbour.Wiki base URL (env HARBOUR_WIKI_BASE_URL)",
+    )
+    parser.add_argument("--token", default=os.getenv("CAPTURE_TOKEN", ""))
+    parser.add_argument(
+        "--modality",
+        choices=["board", "slide", "desk"],
+        default="board",
+        help="What the camera is pointed at (default: board)",
+    )
+    parser.add_argument("--device", type=int, default=int(os.getenv("CAMERA_DEVICE", "0")))
+    parser.add_argument("--pan", type=float, default=None, help="Initial PTZ pan")
+    parser.add_argument("--tilt", type=float, default=None, help="Initial PTZ tilt")
+    parser.add_argument("--zoom", type=float, default=None, help="Initial PTZ zoom")
+    parser.add_argument("--track", action="store_true", help="Auto-pan toward sustained motion (the teacher)")
+    parser.add_argument("--preview", action="store_true", help="Show a live window (useful for aiming; q quits)")
+    parser.add_argument("--poll", type=float, default=0.5, help="Seconds between frame checks")
+    parser.add_argument("--min-send", type=float, default=20.0, help="Minimum seconds between shipped frames")
+    args = parser.parse_args(argv)
+
+    cfg = Config(
+        base_url=args.base_url.rstrip("/"),
+        token=args.token or None,
+        class_id=args.class_id,
+        class_title=args.class_title,
+        lecture_title=args.lecture_title,
+        force_new=False,  # the camera never opens a new lecture over a live one
+        model_size="-",  # unused: no audio in this agent
+        chunk_seconds=DEFAULT_CHUNK_SECONDS,
+        language=None,
+        device=None,
+    )
+    opts = CameraOptions(
+        device=args.device,
+        modality=args.modality,
+        poll_seconds=args.poll,
+        min_send_seconds=args.min_send,
+        track=args.track,
+        preview=args.preview,
+        pan=args.pan,
+        tilt=args.tilt,
+        zoom=args.zoom,
+    )
+    return cfg, opts
+
+
+def main(argv: list[str] | None = None) -> int:
+    cfg, opts = _build(argv)
+    gateway = Gateway(cfg)
+
+    print(f"[camera] class '{cfg.class_id}' — asking {cfg.base_url} …", flush=True)
+    try:
+        started = gateway.start()
+    except requests.RequestException as error:
+        print(f"[camera] could not reach Harbour.Wiki: {error}", file=sys.stderr, flush=True)
+        return 1
+    verb = "joining live" if started.resumed else "starting"
+    print(f"[camera] {verb} lecture #{started.lecture} (session {started.session})", flush=True)
+    print(
+        f"[camera] watching '{opts.modality}' on device {opts.device} — ships a frame when the "
+        "scene is stable AND changed. Ctrl+C to stop.",
+        flush=True,
+    )
+
+    def send(image_b64: str) -> dict:
+        return gateway.send_frame(image_b64, opts.modality, datetime.now(timezone.utc))
+
+    try:
+        sent = run_agent(opts, send)
+        print(f"[camera] done — {sent} frames shipped.", flush=True)
+    except KeyboardInterrupt:
+        print("\n[camera] stopped.", flush=True)
+    # No flush here: the AUDIO recorder owns the lecture lifecycle; the camera
+    # is a second stream into the same session and must not finalize it.
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
