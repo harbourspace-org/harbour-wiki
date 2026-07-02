@@ -26,9 +26,11 @@ TRAILING_SILENCE_SECONDS = 0.8  # a pause this long ends the utterance
 MAX_UTTERANCE_SECONDS = 12.0  # forced cut for a speaker who never pauses
 MAX_SILENCE_BUFFER_SECONDS = 5.0  # discard accumulated silence (empty room)
 
-# Energy gating.
-_ABS_SPEECH_FLOOR = 0.006  # below this RMS nothing counts as speech
-_FLOOR_MULTIPLIER = 3.0  # speech must rise this far above the noise floor
+# Energy gating. Calibrated against real laptop mics at default input volume:
+# speech ≈ 0.005–0.015 RMS, room silence ≈ 0.001–0.003 (measured on a MacBook).
+_ABS_SPEECH_FLOOR = 0.003  # below this RMS nothing counts as speech
+_FLOOR_MULTIPLIER = 2.0  # speech must rise this far above the noise floor
+_FLOOR_CEILING = 0.003  # noise-floor estimate may never creep into speech range
 _FLOOR_EWMA = 0.05  # how fast the noise-floor estimate adapts
 
 
@@ -57,10 +59,10 @@ class UtteranceChunker:
         rms = float(np.sqrt(np.mean(np.square(block)))) if block.size else 0.0
         threshold = max(_ABS_SPEECH_FLOOR, self._noise_floor * _FLOOR_MULTIPLIER)
         if rms < threshold:
-            # Quiet block: let the noise-floor estimate adapt to the room.
-            self._noise_floor = (1 - _FLOOR_EWMA) * self._noise_floor + _FLOOR_EWMA * max(
-                rms, 1e-5
-            )
+            # Quiet block: let the noise-floor estimate adapt to the room,
+            # but never so far up that quiet speech starts reading as noise.
+            adapted = (1 - _FLOOR_EWMA) * self._noise_floor + _FLOOR_EWMA * max(rms, 1e-5)
+            self._noise_floor = min(adapted, _FLOOR_CEILING)
             return False
         return True
 
