@@ -6,7 +6,7 @@
 
 import { listUserLinks } from "./annotations";
 import { getCourse, type Course } from "./courses";
-import { courseLectures, getLectureNote, isLive } from "./lectures";
+import { courseLectures, getLectureNarrative, getLectureNote, isLive } from "./lectures";
 import type { ConceptNode } from "./types";
 
 export type AggConcept = ConceptNode & { sessionId: string; lecture: string };
@@ -33,6 +33,9 @@ export type CourseGraph = {
   backlinks: Map<string, AggLink[]>;
 };
 
+/** Self-heal at most this many missing/stale conspects per page build. */
+const NARRATIVE_HEALS_PER_BUILD = 2;
+
 export async function buildCourseGraph(courseId: string): Promise<CourseGraph | null> {
   const course = await getCourse(courseId);
   if (!course) return null;
@@ -41,6 +44,27 @@ export async function buildCourseGraph(courseId: string): Promise<CourseGraph | 
   const notes = await Promise.all(
     rows.map((l) => getLectureNote(courseId, l.session_id).catch(() => null)),
   );
+
+  // Self-heal: finalized lectures with concepts but a missing or stale
+  // narrative regenerate it here, so conspects appear on the web without an
+  // MCP get_lecture call. Bounded per build, and getLectureNarrative's own
+  // 45s throttle keeps page views from stampeding the LLM.
+  const healable = rows
+    .map((row, i) => ({ row, i, note: notes[i] }))
+    .filter(
+      ({ row, note }) =>
+        note !== null &&
+        !isLive(row) &&
+        note.concepts.length > 0 &&
+        (note.narrative === null || note.narrativeCursor < note.cursor),
+    )
+    .slice(0, NARRATIVE_HEALS_PER_BUILD);
+  const healed = await Promise.all(
+    healable.map(({ row }) => getLectureNarrative(courseId, row.session_id).catch(() => null)),
+  );
+  healed.forEach((h, j) => {
+    if (h) notes[healable[j].i] = { ...h.note, narrative: h.narrative };
+  });
 
   const lectures: Lecture[] = [];
   const conceptsById = new Map<string, AggConcept>();

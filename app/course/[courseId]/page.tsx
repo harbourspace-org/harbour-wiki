@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { CourseSearch } from "@/components/CourseSearch";
 import { buildCourseGraph } from "@/lib/aggregate";
+import { splitConspect } from "@/lib/narrative";
 
 export default async function CoursePage({ params }: { params: Promise<{ courseId: string }> }) {
   const { courseId } = await params;
@@ -57,18 +58,30 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
         </ol>
       </nav>
 
-      {graph.lectures.map((lec) => (
+      {graph.lectures.map((lec) => {
+        const conspect = lec.narrative ? splitConspect(lec.narrative) : null;
+        return (
         <section key={lec.sessionId} id={`l${lec.number}`}>
           <h2>
             {lec.number}. {lec.label}
             {lec.live && <span className="live-badge">LIVE</span>}
           </h2>
-          {lec.narrative && (
+          {conspect && conspect.takeaways.length > 0 && (
+            <div className="takeaways">
+              <span className="takeaways-label">What to remember</span>
+              <ul>
+                {conspect.takeaways.map((t, i) => (
+                  <li key={i}>{t}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {conspect && (
             <details style={{ margin: "0.4rem 0 0.8rem" }}>
               <summary style={{ cursor: "pointer" }}>
                 Lecture conspect <span className="muted">(timestamped)</span>
               </summary>
-              <p style={{ whiteSpace: "pre-wrap", marginTop: "0.5rem" }}>{lec.narrative}</p>
+              <p style={{ whiteSpace: "pre-wrap", marginTop: "0.5rem" }}>{conspect.body}</p>
             </details>
           )}
           {lec.concepts.length === 0 ? (
@@ -89,7 +102,8 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
             </ul>
           )}
         </section>
-      ))}
+        );
+      })}
 
       <p className="footnote">
         Notes are fused from live capture by the Knottra engine and kept here. Ask questions
