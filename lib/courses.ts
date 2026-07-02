@@ -22,11 +22,20 @@ export async function courseSessions(courseId: string): Promise<CourseSession[]>
   );
 }
 
-export async function upsertCourse(id: string, title: string, domainPrompt?: string): Promise<void> {
+export async function upsertCourse(
+  id: string,
+  title?: string,
+  domainPrompt?: string,
+): Promise<void> {
+  // A start call without a title/prompt must not clobber values set earlier
+  // (e.g. a recorder announcing just the class id) — keep the existing ones.
   await q(
-    `INSERT INTO harbour_wiki.course (id, title, domain_prompt) VALUES ($1, $2, $3)
-     ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, domain_prompt = EXCLUDED.domain_prompt`,
-    [id, title, domainPrompt ?? null],
+    `INSERT INTO harbour_wiki.course (id, title, domain_prompt)
+     VALUES ($1, COALESCE($2, $1), $3)
+     ON CONFLICT (id) DO UPDATE SET
+       title = COALESCE($2, harbour_wiki.course.title),
+       domain_prompt = COALESCE($3, harbour_wiki.course.domain_prompt)`,
+    [id, title ?? null, domainPrompt ?? null],
   );
 }
 

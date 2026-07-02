@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
       }
       const { course, lectureTitle, domainPrompt, forceNew } = parsed.data;
       const prompt = domainPrompt ?? DEFAULT_DOMAIN_PROMPT;
-      await upsertCourse(course.id, course.title ?? course.id, prompt);
+      await upsertCourse(course.id, course.title, prompt);
       const started = await startLecture(course.id, lectureTitle, forceNew);
       await setConfig(started.session, prompt);
       return NextResponse.json({
