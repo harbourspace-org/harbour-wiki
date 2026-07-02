@@ -21,11 +21,12 @@ machine.
 - A microphone
 - macOS: PortAudio (bundled in the `sounddevice` wheel; if it fails to load,
   `brew install portaudio`)
+- Windows: nothing extra — all dependencies ship prebuilt wheels
 
 ## Setup
 
 ```bash
-cd harbour-wiki/capture
+cd lecture-capture
 cp .env.example .env          # set HARBOUR_WIKI_BASE_URL + CAPTURE_TOKEN
 
 # with uv (recommended):
@@ -33,6 +34,42 @@ uv sync
 # …or with pip:
 python -m venv .venv && source .venv/bin/activate && pip install -e .
 ```
+
+## Windows lecture-PC install (step by step)
+
+1. **Python** — install 3.11+ from <https://python.org/downloads> and tick
+   **"Add python.exe to PATH"** in the installer.
+2. **Git** — install <https://git-scm.com/download/win> (defaults are fine;
+   its credential manager signs you into GitHub via the browser on first clone).
+3. In **PowerShell**:
+
+   ```powershell
+   pip install uv
+   git clone https://github.com/harbourspace-org/lecture-capture.git
+   cd lecture-capture
+   copy .env.example .env      # then edit .env (notepad .env)
+   uv sync                     # installs deps; first run also downloads the model
+   ```
+
+4. **Microphone permission** — Settings → Privacy & security → Microphone →
+   enable *"Let desktop apps access your microphone"*.
+5. **Pick the right input** (lecture rooms often have several):
+
+   ```powershell
+   uv run python -m sounddevice   # lists devices with their index
+   ```
+
+   Pass the index with `--device N` (or put `AUDIO_DEVICE=N` in `.env`).
+6. **Record:**
+
+   ```powershell
+   uv run lecture-capture --class algorithms-2026 --class-title "Algorithms & Data Structures" --lecture-title "Today's topic"
+   ```
+
+   Speak; each chunk prints as it is sent. **Ctrl+C** stops and finalizes.
+
+> Non-English lectures: set `WHISPER_MODEL=base` (multilingual, not `base.en`)
+> and `WHISPER_LANGUAGE=<code>` in `.env`.
 
 > **Token:** `CAPTURE_TOKEN` must match the value set on the Harbour.Wiki
 > service. If the app leaves `/api/ingest` open (no token configured), you can
