@@ -11,9 +11,21 @@ import { finalizeLecture, startLecture, syncLectureNote } from "@/lib/lectures";
 // (resume-or-create, auto-numbered), which Knottra session backs it, and
 // where the notes live.
 
-const DEFAULT_DOMAIN_PROMPT =
-  "This is a university lecture. Group the speech into the concepts being " +
-  "taught, each with its sub-points and the logical flow between concepts.";
+const DEFAULT_DOMAIN_PROMPT = [
+  "This is a university lecture. You are writing a permanent study wiki, not",
+  "meeting minutes: each concept is an encyclopedia entry a student will",
+  "revise from later, long after the class is forgotten.",
+  "Titles must be noun phrases naming the concept itself (e.g.",
+  "'Breadth-First Search'), never the classroom moment — no 'Introduction to",
+  "the lecture', no titles containing 'lecture' or 'lecturer'.",
+  "Details and sub-points must state definitions, properties, complexity,",
+  "formulas, and worked examples directly as facts. Never narrate the",
+  "classroom: no 'the lecturer/professor/instructor explains', 'is",
+  "introduced', or 'we now move on' — convert transition remarks into the",
+  "actual content they carry, or omit them. Prefer extending an existing",
+  "open concept over opening a near-duplicate, and do not open concepts for",
+  "administrative chatter or jokes.",
+].join(" ");
 
 const eventSchema = z.object({
   timestamp: z.string().min(1),
