@@ -54,10 +54,15 @@ class Gateway:
         if self._cfg.class_title:
             course["title"] = self._cfg.class_title
         body: dict = {"action": "start", "course": course}
-        if self._cfg.lecture_title:
-            body["lectureTitle"] = self._cfg.lecture_title
-        if self._cfg.force_new:
-            body["forceNew"] = True
+        if adopt_session:
+            if self._cfg.lecture_title:
+                body["lectureTitle"] = self._cfg.lecture_title
+            if self._cfg.force_new:
+                body["forceNew"] = True
+        else:
+            # Vocabulary refresh: the gateway must never create or rename a
+            # lecture on our behalf mid-run.
+            body["refreshOnly"] = True
         data = self._post(body)
         if adopt_session or self._session is None:
             self._session = data["session"]
