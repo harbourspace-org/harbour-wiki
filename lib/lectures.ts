@@ -22,6 +22,7 @@ export type LectureRow = {
   label: string | null;
   started_at: string | null;
   finalized_at: string | null;
+  last_seen_at: string | null;
 };
 
 export type LectureNote = {
@@ -41,7 +42,7 @@ export function sessionIdFor(courseId: string, lecture: number): string {
 
 export async function courseLectures(courseId: string): Promise<LectureRow[]> {
   return q<LectureRow>(
-    `SELECT session_id, position, label, started_at, finalized_at
+    `SELECT session_id, position, label, started_at, finalized_at, last_seen_at
      FROM harbour_wiki.course_session WHERE course_id = $1 ORDER BY position`,
     [courseId],
   );
@@ -52,7 +53,7 @@ export async function lectureByNumber(
   lecture: number,
 ): Promise<LectureRow | null> {
   const rows = await q<LectureRow>(
-    `SELECT session_id, position, label, started_at, finalized_at
+    `SELECT session_id, position, label, started_at, finalized_at, last_seen_at
      FROM harbour_wiki.course_session WHERE course_id = $1 AND position = $2`,
     [courseId, lecture],
   );
@@ -60,39 +61,65 @@ export async function lectureByNumber(
 }
 
 /**
- * "Class X is recording now" → resume the current lecture (started recently,
+ * "Class X is recording now" → resume the current lecture (active recently,
  * not finalized) or create the next-numbered one. The gateway decides; the
  * recorder never picks numbers or session ids.
+ *
+ * The resume window slides on last activity (`last_seen_at`, touched by every
+ * ingest), not on `started_at` — a lecture longer than the window must not
+ * spawn a phantom successor. `refreshOnly` (mid-run vocabulary refreshes)
+ * never creates a lecture under any circumstances.
  */
 export async function startLecture(
   courseId: string,
   lectureTitle?: string,
   forceNew = false,
+  refreshOnly = false,
 ): Promise<{ session: string; lecture: number; resumed: boolean }> {
   const lectures = await courseLectures(courseId);
   const last = lectures[lectures.length - 1];
 
+  if (refreshOnly) {
+    if (!last) throw new Error(`vocabulary refresh for '${courseId}' before any lecture started`);
+    return { session: last.session_id, lecture: last.position, resumed: true };
+  }
+
+  const lastActive = last?.last_seen_at ?? last?.started_at;
   const resumable =
     !forceNew &&
     last &&
     !last.finalized_at &&
-    last.started_at !== null &&
-    Date.now() - new Date(last.started_at).getTime() < RESUME_WINDOW_MS;
+    lastActive != null &&
+    Date.now() - new Date(lastActive).getTime() < RESUME_WINDOW_MS;
 
   if (resumable) {
+    // A deliberate restart may carry a better title — adopt it.
+    await q(
+      `UPDATE harbour_wiki.course_session
+       SET last_seen_at = now(), label = COALESCE($2, label)
+       WHERE session_id = $1`,
+      [last.session_id, lectureTitle ?? null],
+    );
     return { session: last.session_id, lecture: last.position, resumed: true };
   }
 
   const next = (last?.position ?? 0) + 1;
   const session = sessionIdFor(courseId, next);
   await q(
-    `INSERT INTO harbour_wiki.course_session (course_id, session_id, position, label, started_at)
-     VALUES ($1, $2, $3, $4, now())
+    `INSERT INTO harbour_wiki.course_session (course_id, session_id, position, label, started_at, last_seen_at)
+     VALUES ($1, $2, $3, $4, now(), now())
      ON CONFLICT (course_id, session_id)
-       DO UPDATE SET started_at = now(), finalized_at = NULL, label = EXCLUDED.label`,
+       DO UPDATE SET started_at = now(), last_seen_at = now(), finalized_at = NULL, label = EXCLUDED.label`,
     [courseId, session, next, lectureTitle ?? `Lecture ${next}`],
   );
   return { session, lecture: next, resumed: false };
+}
+
+/** Mark the lecture as actively receiving events — slides the resume window. */
+export async function touchLecture(session: string): Promise<void> {
+  await q(`UPDATE harbour_wiki.course_session SET last_seen_at = now() WHERE session_id = $1`, [
+    session,
+  ]);
 }
 
 export async function finalizeLecture(session: string): Promise<void> {

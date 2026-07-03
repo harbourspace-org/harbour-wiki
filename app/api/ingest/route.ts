@@ -8,6 +8,7 @@ import {
   finalizeLecture,
   startLecture,
   syncLectureNote,
+  touchLecture,
 } from "@/lib/lectures";
 
 // Single gateway to Knottra for capture clients. The recorder never holds the
@@ -49,6 +50,9 @@ const startSchema = z.object({
   lectureTitle: z.string().min(1).max(256).optional(),
   domainPrompt: z.string().max(8000).optional(),
   forceNew: z.boolean().optional(),
+  // Mid-run vocabulary refresh: answer with the current lecture + vocabulary,
+  // but never create or reconfigure anything.
+  refreshOnly: z.boolean().optional(),
 });
 
 // stream/flush: session-addressed (the session came from `start`).
@@ -81,11 +85,11 @@ export async function POST(req: NextRequest) {
           { status: 400 },
         );
       }
-      const { course, lectureTitle, domainPrompt, forceNew } = parsed.data;
+      const { course, lectureTitle, domainPrompt, forceNew, refreshOnly } = parsed.data;
       const prompt = domainPrompt ?? DEFAULT_DOMAIN_PROMPT;
-      await upsertCourse(course.id, course.title, prompt);
-      const started = await startLecture(course.id, lectureTitle, forceNew);
-      await setConfig(started.session, prompt);
+      if (!refreshOnly) await upsertCourse(course.id, course.title, prompt);
+      const started = await startLecture(course.id, lectureTitle, forceNew, refreshOnly);
+      if (!refreshOnly) await setConfig(started.session, prompt);
       return NextResponse.json({
         status: "ok",
         course: course.id,
@@ -110,7 +114,11 @@ export async function POST(req: NextRequest) {
     // Session ids are gateway-derived: "<courseId>--lNN".
     const courseId = parsed.data.courseId ?? session.split("--l")[0];
 
-    if (events && events.length > 0) await ingest(session, events);
+    if (events && events.length > 0) {
+      await ingest(session, events);
+      // Slide the resume window: the lecture is demonstrably still going.
+      await touchLecture(session);
+    }
     if (doFlush) {
       await flush(session);
       await finalizeLecture(session);

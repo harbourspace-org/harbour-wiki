@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS harbour_wiki.course_session (
 );
 ALTER TABLE harbour_wiki.course_session ADD COLUMN IF NOT EXISTS started_at timestamptz;
 ALTER TABLE harbour_wiki.course_session ADD COLUMN IF NOT EXISTS finalized_at timestamptz;
+-- Last ingest activity; the resume window slides on this, not on started_at,
+-- so lectures longer than the window don't spawn phantom successors.
+ALTER TABLE harbour_wiki.course_session ADD COLUMN IF NOT EXISTS last_seen_at timestamptz;
 -- The materialized wiki store: the lecture's notes, KEPT here permanently
 -- (the Obsidian+Wikipedia layer). Synced from Knottra deltas while LIVE.
 CREATE TABLE IF NOT EXISTS harbour_wiki.lecture_note (
