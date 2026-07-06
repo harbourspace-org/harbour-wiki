@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { Annotations } from "@/components/Annotations";
+import { Md } from "@/components/Markdown";
 import { buildCourseGraph } from "@/lib/aggregate";
 
 export default async function ConceptPage({
@@ -72,12 +73,18 @@ export default async function ConceptPage({
         </aside>
       )}
 
-      {concept.detail && <p style={{ fontSize: "1.02rem" }}>{concept.detail}</p>}
+      {concept.detail && (
+        <div style={{ fontSize: "1.02rem" }}>
+          <Md text={concept.detail} />
+        </div>
+      )}
 
       {concept.sub_points.length > 0 && (
         <ul>
           {concept.sub_points.map((sp, i) => (
-            <li key={i}>{sp.text}</li>
+            <li key={i}>
+              <Md text={sp.text} inline />
+            </li>
           ))}
         </ul>
       )}

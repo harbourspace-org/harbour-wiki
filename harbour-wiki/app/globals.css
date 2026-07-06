@@ -278,3 +278,27 @@ li { margin: 0.2em 0; }
   font-size: 0.82rem;
   color: var(--text-soft);
 }
+
+/* ---------- fused text (markdown + math) ---------- */
+.md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.86em;
+  background: rgba(0, 0, 0, 0.045);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.04em 0.3em;
+}
+.md pre {
+  overflow-x: auto;
+  padding: 0.6em 0.8em;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+.md pre code { background: none; border: none; padding: 0; }
+.md p { margin: 0.4em 0; }
+.md p:first-child { margin-top: 0; }
+.md p:last-child { margin-bottom: 0; }
+.md table { border-collapse: collapse; margin: 0.5em 0; }
+.md th, .md td { border: 1px solid var(--rule); padding: 0.25em 0.6em; }
+.md .katex { font-size: 1.04em; }
+.selfcheck details .md { margin: 0.3em 0 0.4em 1.1em; color: var(--text-soft); }

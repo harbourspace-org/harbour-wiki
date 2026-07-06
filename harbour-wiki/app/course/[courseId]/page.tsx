@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { CourseSearch } from "@/components/CourseSearch";
+import { Md } from "@/components/Markdown";
 import { buildCourseGraph } from "@/lib/aggregate";
 import { splitConspect } from "@/lib/narrative";
 
@@ -71,7 +72,9 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
               <span className="takeaways-label">What to remember</span>
               <ul>
                 {conspect.takeaways.map((t, i) => (
-                  <li key={i}>{t}</li>
+                  <li key={i}>
+                    <Md text={t} inline />
+                  </li>
                 ))}
               </ul>
             </div>
@@ -81,8 +84,10 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
               <span className="selfcheck-label">Check yourself</span>
               {conspect.quiz.map((q, i) => (
                 <details key={i}>
-                  <summary>{q.question}</summary>
-                  <p>{q.answer}</p>
+                  <summary>
+                    <Md text={q.question} inline />
+                  </summary>
+                  <Md text={q.answer} />
                 </details>
               ))}
             </div>
@@ -92,7 +97,9 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
               <summary style={{ cursor: "pointer" }}>
                 Lecture conspect <span className="muted">(timestamped)</span>
               </summary>
-              <p style={{ whiteSpace: "pre-wrap", marginTop: "0.5rem" }}>{conspect.body}</p>
+              <div style={{ marginTop: "0.5rem" }}>
+                <Md text={conspect.body} breaks />
+              </div>
             </details>
           )}
           {lec.concepts.length === 0 ? (
@@ -105,7 +112,7 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
                   {c.detail && (
                     <span className="muted">
                       {" "}
-                      — {c.detail.length > 110 ? `${c.detail.slice(0, 110)}…` : c.detail}
+                      — <Md text={c.detail.length > 110 ? `${c.detail.slice(0, 110)}…` : c.detail} inline />
                     </span>
                   )}
                 </li>
