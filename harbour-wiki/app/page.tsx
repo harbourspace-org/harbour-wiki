@@ -1,6 +1,5 @@
 import Link from "next/link";
 
-import { CourseSeed } from "@/components/CourseSeed";
 import { listCourses } from "@/lib/courses";
 import { courseLectures, isLive } from "@/lib/lectures";
 
@@ -47,15 +46,6 @@ export default async function Home() {
       ) : (
         <p className="muted">No courses yet.</p>
       )}
-
-      <div className="panel" style={{ marginTop: "2rem", maxWidth: "34rem" }}>
-        <span className="label">Try it</span>
-        <p className="muted" style={{ margin: "0 0 0.5rem", fontSize: "0.9rem" }}>
-          Seed a demo course to see a structured lecture, or record a real one with the
-          lecture-capture tool.
-        </p>
-        <CourseSeed />
-      </div>
 
       <p className="footnote">
         Built on <a href="https://github.com/harbourspace-org/knottra">Knottra</a>, the
