@@ -1,0 +1,31 @@
+{
+  "dxt_version": "0.1",
+  "name": "harbour-wiki",
+  "display_name": "Harbour.Wiki",
+  "version": "0.1.0",
+  "description": "Ask your lectures anything — live. Structured notes from every Harbour.Space lecture, including the one happening right now.",
+  "author": {
+    "name": "Harbour.Space"
+  },
+  "homepage": "https://harbour-wiki-production.up.railway.app",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {
+        "HARBOUR_WIKI_KEY": "${user_config.access_key}"
+      }
+    }
+  },
+  "user_config": {
+    "access_key": {
+      "type": "string",
+      "title": "Access key",
+      "description": "The Harbour.Wiki access key shared by your teacher.",
+      "sensitive": true,
+      "required": true
+    }
+  }
+}

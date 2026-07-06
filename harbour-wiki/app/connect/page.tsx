@@ -30,13 +30,16 @@ export default function ConnectPage() {
         <div className="toc-title">Contents</div>
         <ol>
           <li>
+            <a href="#plugin">One-click plugin for Claude Desktop</a>
+          </li>
+          <li>
             <a href="#link">Get your connector link</a>
           </li>
           <li>
             <a href="#web">Claude.ai in the browser (Pro/Max)</a>
           </li>
           <li>
-            <a href="#desktop">Claude Desktop (any plan)</a>
+            <a href="#desktop">Claude Desktop, manual config (any plan)</a>
           </li>
           <li>
             <a href="#ask">What to ask</a>
@@ -44,8 +47,27 @@ export default function ConnectPage() {
         </ol>
       </nav>
 
+      <section id="plugin">
+        <h2>1. One-click plugin (Claude Desktop, any plan)</h2>
+        <p>The easiest way — no config files, no terminal:</p>
+        <ul>
+          <li>
+            <a href="/harbour-wiki.mcpb" download>
+              <b>Download the Harbour.Wiki plugin</b>
+            </a>{" "}
+            (<code>harbour-wiki.mcpb</code>, ~1.4&nbsp;MB).
+          </li>
+          <li>Double-click the file (or drag it onto Claude Desktop) and press Install.</li>
+          <li>Paste the access key your teacher shared when asked, and enable the plugin.</li>
+        </ul>
+        <p className="muted">
+          The plugin talks to this site — you&apos;ll always see the latest lectures without
+          updating it.
+        </p>
+      </section>
+
       <section id="link">
-        <h2>1. Get your connector link</h2>
+        <h2>2. Get your connector link</h2>
         <p>
           Your teacher shares the connector link for your course. It looks like this (the part
           after <code>?key=</code> is the access key):
@@ -56,7 +78,7 @@ export default function ConnectPage() {
       </section>
 
       <section id="web">
-        <h2>2. Claude.ai in the browser (Pro/Max accounts)</h2>
+        <h2>3. Claude.ai in the browser (Pro/Max accounts)</h2>
         <ul>
           <li>
             Open <b>claude.ai → Settings → Connectors</b> and choose <b>Add custom connector</b>.
@@ -73,7 +95,7 @@ export default function ConnectPage() {
       </section>
 
       <section id="desktop">
-        <h2>3. Claude Desktop (works on any plan)</h2>
+        <h2>4. Claude Desktop, manual config (works on any plan)</h2>
         <p>
           Install Claude Desktop, then add this to its config file (Settings → Developer → Edit
           config, or <code>claude_desktop_config.json</code>) — paste your full connector link:
@@ -92,7 +114,7 @@ export default function ConnectPage() {
       </section>
 
       <section id="ask">
-        <h2>4. What to ask</h2>
+        <h2>5. What to ask</h2>
         <ul>
           <li>
             <i>“List the courses.”</i> — see what&apos;s available, and which lecture is LIVE.

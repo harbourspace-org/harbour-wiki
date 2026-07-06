@@ -1,0 +1,9 @@
+{
+  "name": "harbour-wiki-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Harbour.Wiki MCP bundle for Claude Desktop",
+  "dependencies": {
+    "mcp-remote": "^0.1.21"
+  }
+}
