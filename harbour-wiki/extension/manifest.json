@@ -2,7 +2,7 @@
   "dxt_version": "0.1",
   "name": "harbour-wiki",
   "display_name": "Harbour.Wiki",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Ask your lectures anything — live. Structured notes from every Harbour.Space lecture, including the one happening right now.",
   "author": {
     "name": "Harbour.Space"
