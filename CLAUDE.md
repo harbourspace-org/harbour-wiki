@@ -12,10 +12,14 @@ Real-time lecture capture → structured live notes → permanent browsable wiki
 
 Division of labour (hard rule): **Knottra is hierarchy-blind** — it only sees opaque session ids and answers data queries (`/events`, `/record?since=`, semantic search). All course/lecture/student domain logic lives in `harbour-wiki/`. Never leak wiki domain concepts into knottra. See `PIPELINE.md` for the full design.
 
+## Committing & pushing (one command)
+
+Use `scripts/ship.sh "message"` (or the `git ship "message"` alias) — it commits any knottra changes to knottra's own repo, bumps the submodule pointer, commits the monorepo, and pushes once (`push.recurseSubmodules=on-demand` pushes knottra automatically). Prefer this over manual two-step commits.
+
 ## Working with the knottra submodule
 
 - Edit code directly in `knottra/` — it's a normal checkout of its own repo.
-- Commit and push **inside** `knottra/` first (to `harbourspace-org/knottra`), then commit the updated submodule pointer here: `git add knottra && git commit`.
+- Manual flow (what ship.sh automates): commit and push **inside** `knottra/` first (to `harbourspace-org/knottra`), then commit the updated submodule pointer here: `git add knottra && git commit`.
 - After `git pull` in this repo: `git submodule update --init` to sync knottra to the pinned commit.
 - Fresh clone: `git clone --recurse-submodules`.
 - Because knottra may become public: no secrets, no Harbour-internal references in its code or commit messages.
