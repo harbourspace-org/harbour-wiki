@@ -1,0 +1,23 @@
+# Env / secrets
+.env
+.env.local
+*.local
+
+# Node
+node_modules/
+dist/
+.next/
+*.log
+
+# Python
+__pycache__/
+.venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# TypeScript incremental build info
+tsconfig.tsbuildinfo

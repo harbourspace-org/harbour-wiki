@@ -1,0 +1,280 @@
+@import "tailwindcss";
+
+/* ============================================================
+   Harbour.Wiki — encyclopedia look (Wikipedia-style)
+   White page, black text, blue links, serif article titles,
+   gray utility boxes. Simple and readable above all.
+   ============================================================ */
+
+:root {
+  --bg: #ffffff;
+  --text: #202122;
+  --text-soft: #54595d;
+  --link: #3366cc;
+  --link-visited: #6b4ba1;
+  --border: #a2a9b1;
+  --rule: #c8ccd1;
+  --box: #f8f9fa;
+  --live: #d33;
+
+  --serif: "Linux Libertine", "Libertinus Serif", Georgia, "Times New Roman", serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+
+  /* kept for older inline styles */
+  --ink: var(--text);
+  --ink-soft: var(--text-soft);
+  --ink-faint: var(--text-soft);
+  --font-display: var(--serif);
+  --text-hero: 1.9rem;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+/* ---------- layout shell ---------- */
+.shell {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 1.25rem 4rem;
+}
+
+/* ---------- site header ---------- */
+.masthead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.8rem 0;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 1rem;
+}
+.wordmark {
+  font-family: var(--serif);
+  font-size: 1.5rem;
+  color: var(--text);
+}
+.wordmark b { color: var(--link); }
+.masthead .meta { font-size: 0.85rem; color: var(--text-soft); }
+
+/* ---------- links ---------- */
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+a:visited { color: var(--link-visited); }
+a.plain, a.plain:visited { color: var(--link); }
+
+/* ---------- article typography ---------- */
+h1, .article-title {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 1.9rem;
+  line-height: 1.25;
+  margin: 0.2em 0 0.25em;
+  padding-bottom: 0.17em;
+  border-bottom: 1px solid var(--border);
+}
+h2 {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 1.45rem;
+  margin: 1.2em 0 0.4em;
+  padding-bottom: 0.15em;
+  border-bottom: 1px solid var(--rule);
+}
+h3 { font-size: 1.1rem; font-weight: 600; margin: 1em 0 0.35em; }
+p { margin: 0.5em 0; }
+ul { margin: 0.4em 0 0.6em 1.4em; padding: 0; }
+li { margin: 0.2em 0; }
+
+.subtitle {
+  font-size: 0.85rem;
+  color: var(--text-soft);
+  margin: -0.2em 0 1em;
+}
+
+.dek, .kicker { color: var(--text-soft); font-size: 0.95rem; }
+.kicker { text-transform: none; letter-spacing: 0; }
+.label {
+  display: block;
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 0.3rem;
+}
+.muted { color: var(--text-soft); }
+
+/* ---------- boxes (TOC, infobox, panels) ---------- */
+.panel, .toc, .infobox {
+  background: var(--box);
+  border: 1px solid var(--border);
+  padding: 0.8rem 1rem;
+  font-size: 0.95rem;
+}
+.toc { display: inline-block; min-width: 16rem; margin: 0.6rem 0 1rem; }
+.toc-title { font-weight: 700; text-align: center; margin-bottom: 0.3rem; font-size: 0.95rem; }
+.toc ol { margin: 0 0 0 1.4em; padding: 0; }
+.toc li { margin: 0.15em 0; }
+.infobox { float: right; width: 17rem; margin: 0 0 1rem 1.25rem; }
+@media (max-width: 760px) {
+  .infobox { float: none; width: 100%; margin: 0.8rem 0; }
+}
+
+/* ---------- live badge ---------- */
+.live-badge {
+  display: inline-block;
+  color: var(--live);
+  font-weight: 700;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--live);
+  border-radius: 3px;
+  padding: 0 0.4em;
+  margin-left: 0.5em;
+  vertical-align: middle;
+}
+.live-badge::before { content: "● "; font-size: 0.7em; vertical-align: 0.1em; }
+
+/* ---------- modality tags ---------- */
+.tags { display: inline-flex; flex-wrap: wrap; gap: 0.35rem; }
+.tag {
+  font-size: 0.72rem;
+  color: var(--text-soft);
+  background: var(--box);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0 0.4em;
+}
+.tag.speech { color: #36c; border-color: #36c; background: #eaf3ff; }
+.tag.board { color: #14866d; border-color: #14866d; background: #ecfff5; }
+.tag.slide { color: #a66200; border-color: #a66200; background: #fef6e7; }
+
+/* ---------- lecture entries (session page) ---------- */
+.entries { margin-top: 1rem; }
+.entry { display: flex; gap: 0.8rem; padding: 0.6rem 0; }
+.entry-num { color: var(--text-soft); min-width: 2.2rem; font-size: 0.9rem; padding-top: 0.35rem; }
+.entry-body { flex: 1; }
+.entry-title {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 1.35rem;
+  margin: 0 0 0.2em;
+  padding-bottom: 0.12em;
+  border-bottom: 1px solid var(--rule);
+}
+.entry-detail { margin: 0.3em 0; }
+.subpoints { margin: 0.4em 0 0.4em 1.4em; }
+.subpoints li { margin: 0.2em 0; }
+
+/* ---------- cross-references ---------- */
+.connections { font-size: 0.92rem; }
+.connections .kind {
+  font-style: italic;
+  color: var(--text-soft);
+  font-size: 0.85rem;
+}
+
+/* ---------- forms ---------- */
+.field {
+  flex: 1;
+  width: 100%;
+  font: inherit;
+  font-size: 0.95rem;
+  color: var(--text);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0.35rem 0.6rem;
+}
+.field:focus { outline: 2px solid #36c; outline-offset: -1px; border-color: #36c; }
+.btn {
+  font: inherit;
+  font-size: 0.95rem;
+  color: var(--text);
+  background: var(--box);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+}
+.btn:hover { background: #eaecf0; }
+.btn:disabled { opacity: 0.6; cursor: default; }
+
+/* ---------- search hits / answers ---------- */
+.hit {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding: 0.45rem 0;
+  border-top: 1px solid var(--rule);
+  margin-top: 0.45rem;
+}
+.hit .score { color: var(--text-soft); font-size: 0.78rem; min-width: 2.4rem; }
+.answer {
+  margin-top: 0.8rem;
+  padding: 0.8rem 1rem;
+  background: var(--box);
+  border-left: 3px solid var(--link);
+  font-size: 0.98rem;
+}
+.cite { color: var(--text-soft); font-size: 0.85rem; }
+.formula { font-family: Georgia, serif; font-style: italic; }
+
+/* ---------- lecture takeaways ---------- */
+.takeaways {
+  margin: 0.5rem 0 0.8rem;
+  padding: 0.6rem 0.9rem 0.7rem;
+  background: var(--box);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--link);
+  font-size: 0.95rem;
+}
+.takeaways-label {
+  display: block;
+  font-variant: small-caps;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--text-soft);
+  margin-bottom: 0.25rem;
+}
+.takeaways ul { margin: 0 0 0 1.25em; }
+.takeaways li { margin: 0.18em 0; }
+
+/* ---------- lecture self-check quiz ---------- */
+.selfcheck {
+  margin: 0.5rem 0 0.8rem;
+  padding: 0.6rem 0.9rem 0.7rem;
+  background: var(--box);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--link);
+  font-size: 0.95rem;
+}
+.selfcheck-label {
+  display: block;
+  font-variant: small-caps;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--text-soft);
+  margin-bottom: 0.25rem;
+}
+.selfcheck details { margin: 0.18em 0; }
+.selfcheck summary { cursor: pointer; }
+.selfcheck summary:hover { color: var(--link); }
+.selfcheck details p { margin: 0.3em 0 0.4em 1.1em; color: var(--text-soft); }
+
+/* ---------- footer note ---------- */
+.footnote {
+  margin-top: 3rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--rule);
+  font-size: 0.82rem;
+  color: var(--text-soft);
+}

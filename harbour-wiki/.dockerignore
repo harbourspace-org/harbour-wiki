@@ -1,0 +1,11 @@
+# Keep the build context clean and, crucially, stop the host's node_modules
+# (macOS arm64) and prior build output from clobbering what we install/build
+# for linux inside the image.
+node_modules
+.next
+.git
+.env
+.env.local
+*.local
+npm-debug.log*
+.DS_Store
