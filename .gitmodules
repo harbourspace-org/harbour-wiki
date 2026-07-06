@@ -1,0 +1,3 @@
+[submodule "knottra"]
+	path = knottra
+	url = https://github.com/harbourspace-org/knottra.git
