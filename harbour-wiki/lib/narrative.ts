@@ -142,7 +142,10 @@ export async function writeNarrative(note: LectureNote): Promise<string | null> 
     headers: { Authorization: `Bearer ${LLM_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: LLM_MODEL,
-      max_tokens: 3000,
+      // Long lectures (20+ concepts) overflowed 3000 and got truncated before
+      // the trailing "Check yourself:" block — which made isLegacyConspect
+      // treat them as stale forever (endless regen churn).
+      max_tokens: 8000,
       messages: [
         { role: "system", content: SYSTEM },
         {

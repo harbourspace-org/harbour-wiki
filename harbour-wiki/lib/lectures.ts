@@ -262,9 +262,21 @@ export async function courseVocabulary(courseId: string, limit = 40): Promise<st
 const NARRATIVE_THROTTLE_MS = 45_000;
 
 /**
+ * When the "Check yourself:" quiz format shipped. Only conspects written
+ * BEFORE this are format-stale: anything newer came from the current prompt,
+ * so if it still has no quiz block, regenerating won't add one — treating it
+ * as stale forever caused an endless rewrite loop on every page view.
+ */
+const QUIZ_FORMAT_SHIPPED_AT = Date.parse("2026-07-03T00:00:00Z");
+
+/** Sessions with a narrative rewrite already in flight (stampede guard). */
+const regenInFlight = new Set<string>();
+
+/**
  * The whole-lecture story: LLM-rewritten, timestamped prose covering the
- * record up to its cursor. Regenerated lazily when the record has moved past
- * what the narrative covers (throttled — live polls shouldn't stampede the LLM).
+ * record up to its cursor. When the stored narrative is behind, it is served
+ * as-is and refreshed in the background (stale-while-revalidate) — readers
+ * never wait on the LLM unless the lecture has no narrative at all yet.
  */
 export async function getLectureNarrative(
   courseId: string,
@@ -276,28 +288,43 @@ export async function getLectureNarrative(
   const note = await getLectureNote(courseId, session);
   if (!note) return null;
 
-  // A narrative that predates the "Check yourself:" quiz format is treated as
-  // stale so it regenerates once; the narrativeAt throttle below still gates
-  // retries, so page views cannot stampede the LLM.
-  const covered =
+  const writtenAt = note.narrativeAt ? new Date(note.narrativeAt).getTime() : null;
+  const formatStale =
     note.narrative !== null &&
-    note.narrativeCursor >= note.cursor &&
-    !isLegacyConspect(note.narrative);
+    isLegacyConspect(note.narrative) &&
+    (writtenAt === null || writtenAt < QUIZ_FORMAT_SHIPPED_AT);
+  const covered =
+    note.narrative !== null && note.narrativeCursor >= note.cursor && !formatStale;
   const throttled =
-    note.narrativeAt !== null &&
-    Date.now() - new Date(note.narrativeAt).getTime() < NARRATIVE_THROTTLE_MS;
+    writtenAt !== null && Date.now() - writtenAt < NARRATIVE_THROTTLE_MS;
   if (covered || (note.narrative !== null && throttled)) {
     return { narrative: note.narrative, note };
   }
 
-  const text = await writeNarrative(note).catch(() => null);
-  if (text === null) return { narrative: note.narrative, note };
+  const regenerate = async (): Promise<string | null> => {
+    const text = await writeNarrative(note).catch(() => null);
+    if (text === null) return null;
+    await q(
+      `UPDATE harbour_wiki.lecture_note
+       SET narrative = $2, narrative_cursor = $3, narrative_at = now()
+       WHERE session_id = $1`,
+      [session, text, note.cursor],
+    );
+    return text;
+  };
 
-  await q(
-    `UPDATE harbour_wiki.lecture_note
-     SET narrative = $2, narrative_cursor = $3, narrative_at = now()
-     WHERE session_id = $1`,
-    [session, text, note.cursor],
-  );
-  return { narrative: text, note };
+  if (note.narrative !== null) {
+    // Serve the stored conspect immediately; refresh behind the response.
+    if (!regenInFlight.has(session)) {
+      regenInFlight.add(session);
+      void regenerate()
+        .catch(() => null)
+        .finally(() => regenInFlight.delete(session));
+    }
+    return { narrative: note.narrative, note };
+  }
+
+  // First structuring of this lecture — nothing to serve yet, write inline.
+  const text = await regenerate();
+  return { narrative: text ?? note.narrative, note };
 }
