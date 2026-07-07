@@ -49,6 +49,12 @@ def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
     parser.add_argument("--pan", type=float, default=None, help="Initial PTZ pan")
     parser.add_argument("--tilt", type=float, default=None, help="Initial PTZ tilt")
     parser.add_argument("--zoom", type=float, default=None, help="Initial PTZ zoom")
+    parser.add_argument(
+        "--auto-aim",
+        action="store_true",
+        help="Find the board/screen and frame it autonomously (PTZ if available; "
+        "digital crop always). Re-scouts if the target is lost.",
+    )
     parser.add_argument("--track", action="store_true", help="Auto-pan toward sustained motion (the teacher)")
     parser.add_argument("--preview", action="store_true", help="Show a live window (useful for aiming; q quits)")
     parser.add_argument("--poll", type=float, default=0.5, help="Seconds between frame checks")
@@ -84,6 +90,7 @@ def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
         pan=args.pan,
         tilt=args.tilt,
         zoom=args.zoom,
+        auto_aim=args.auto_aim,
     )
     return cfg, opts, bool(args.test_frame), bool(args.list_devices)
 

@@ -46,6 +46,7 @@ class CameraOptions:
     pan: float | None
     tilt: float | None
     zoom: float | None
+    auto_aim: bool = False  # find the board/screen and frame it autonomously
 
 
 # --------------------------------------------------------------------------- #
@@ -153,6 +154,12 @@ def make_test_board() -> np.ndarray:
 class PTZ:
     """Best-effort UVC pan/tilt/zoom via OpenCV properties. No-ops if absent."""
 
+    # Hardware step sizes per AimController unit step. UVC units vary wildly
+    # between cameras; the controller's sign/stall learning absorbs the rest.
+    PAN_STEP = 1.0
+    TILT_STEP = 1.0
+    ZOOM_STEP = 10.0
+
     def __init__(self, cap: cv2.VideoCapture) -> None:
         self._cap = cap
         # UVC PTZ properties read back -1 on cameras that lack motors.
@@ -169,6 +176,18 @@ class PTZ:
     def nudge_pan(self, step: float) -> None:
         current = self._cap.get(cv2.CAP_PROP_PAN)
         self._cap.set(cv2.CAP_PROP_PAN, current + step)
+
+    def nudge_tilt(self, step: float) -> None:
+        current = self._cap.get(cv2.CAP_PROP_TILT)
+        self._cap.set(cv2.CAP_PROP_TILT, current + step)
+
+    def nudge_zoom(self, step: float) -> None:
+        current = self._cap.get(cv2.CAP_PROP_ZOOM)
+        self._cap.set(cv2.CAP_PROP_ZOOM, max(0.0, current + step))
+
+    def zoom_out_full(self) -> None:
+        """Widest view — used when the target is lost and we re-scout."""
+        self._cap.set(cv2.CAP_PROP_ZOOM, 0.0)
 
 
 def open_camera(device: int) -> cv2.VideoCapture:
@@ -210,16 +229,25 @@ def probe_devices(max_index: int = 10) -> list[tuple[int, int, int, bool]]:
 
 def run_agent(opts: CameraOptions, send_frame) -> int:
     """Main loop. ``send_frame(b64) -> dict`` ships one frame; returns count sent."""
+    from .aiming import AimController, crop_to_bbox, detect_target
+
     cap = open_camera(opts.device)
     ptz = PTZ(cap)
     if any(v is not None for v in (opts.pan, opts.tilt, opts.zoom)):
         ptz.apply(opts.pan, opts.tilt, opts.zoom)
         print(f"[camera] PTZ applied (supported={ptz.supported})", flush=True)
 
+    aimer = AimController() if opts.auto_aim else None
+    if aimer is not None:
+        mode = "PTZ + digital crop" if ptz.supported else "digital crop only (no PTZ motors)"
+        print(f"[camera] auto-aim ON — {mode}", flush=True)
+    aim_settled = False
+
     policy = SnapshotPolicy(min_send_seconds=opts.min_send_seconds)
     prev: np.ndarray | None = None
     off_center_polls = 0
     sent = 0
+    last_bbox = None
 
     try:
         while True:
@@ -231,8 +259,39 @@ def run_agent(opts: CameraOptions, send_frame) -> int:
             cur = small_gray(frame)
             now = time.monotonic()
 
+            if aimer is not None:
+                bbox = detect_target(frame)
+                if bbox is not None:
+                    last_bbox = bbox
+                command = aimer.observe(bbox, frame.shape[1], frame.shape[0])
+                if command.lost:
+                    last_bbox = None
+                    aimer.reset()
+                    if ptz.supported:
+                        print("[camera] target lost — zooming out to re-scout", flush=True)
+                        ptz.zoom_out_full()
+                    aim_settled = False
+                elif command.moving and ptz.supported:
+                    if aim_settled:
+                        print("[camera] re-aiming …", flush=True)
+                    aim_settled = False
+                    if command.pan:
+                        ptz.nudge_pan(command.pan * PTZ.PAN_STEP)
+                    if command.tilt:
+                        ptz.nudge_tilt(command.tilt * PTZ.TILT_STEP)
+                    if command.zoom:
+                        ptz.nudge_zoom(command.zoom * PTZ.ZOOM_STEP)
+                    # Let the motors move before judging the result or shipping.
+                    prev = cur
+                    time.sleep(max(opts.poll_seconds, 0.4))
+                    continue
+                elif command.settled and not aim_settled:
+                    aim_settled = True
+                    print("[camera] aim settled — target framed", flush=True)
+
             # --track: pan toward sustained off-center motion (the teacher).
-            if opts.track and ptz.supported and prev is not None:
+            # Skipped under auto-aim (the aimer owns the motors).
+            if opts.track and aimer is None and ptz.supported and prev is not None:
                 cx = motion_centroid_x(prev, cur)
                 if cx is not None and abs(cx - 0.5) > 0.25:
                     off_center_polls += 1
@@ -243,19 +302,26 @@ def run_agent(opts: CameraOptions, send_frame) -> int:
                     off_center_polls = 0
 
             if policy.observe(cur, now):
+                # Digital framing: ship the detected target region, not the
+                # whole room — this is what makes handwriting legible.
+                out = crop_to_bbox(frame, last_bbox) if (aimer is not None and last_bbox) else frame
                 try:
-                    result = send_frame(encode_jpeg_b64(frame))
+                    result = send_frame(encode_jpeg_b64(out))
                     policy.mark_sent(cur, now)
-                    if result.get("extracted"):
+                    if result.get("ingested"):
                         sent += 1
-                        print(f"[{sent:>3}] {opts.modality}: {result.get('chars')} chars extracted", flush=True)
+                        print(f"[{sent:>3}] {opts.modality} frame shipped", flush=True)
                     else:
-                        print("[camera] frame had nothing readable — skipped", flush=True)
+                        print("[camera] frame not ingested — skipped", flush=True)
                 except Exception as error:  # noqa: BLE001 — keep watching on any send failure
                     print(f"[camera] send failed: {error}", flush=True)
 
             if opts.preview:
-                cv2.imshow("lecture-camera (q to quit)", cv2.resize(frame, (960, 540)))
+                shown = frame.copy()
+                if aimer is not None and last_bbox:
+                    x, y, w, h = last_bbox
+                    cv2.rectangle(shown, (x, y), (x + w, y + h), (0, 200, 0), 3)
+                cv2.imshow("lecture-camera (q to quit)", cv2.resize(shown, (960, 540)))
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 

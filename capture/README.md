@@ -146,11 +146,33 @@ real camera: add `--test-frame`. Aim a PTZ camera interactively with
 |---|---|
 | `--modality` | `board` \| `slide` \| `desk` — what this camera watches |
 | `--device` | Index from `--list-devices` |
+| `--auto-aim` | Aim autonomously (see below) |
 | `--track` | Nudge PTZ pan toward sustained motion (the teacher) |
 | `--pan` / `--tilt` / `--zoom` | Initial PTZ position (UVC cameras only) |
 | `--min-send` | Minimum seconds between shipped frames (default 20) |
 | `--test-frame` | Ship one synthetic board image and exit — no camera needed |
 | `--list-devices` | Probe indices 0-9, print which open, then exit |
+
+### Autonomous aiming (`--auto-aim`)
+
+With `--auto-aim` the agent frames the board/screen itself — no manual
+`--pan/--tilt/--zoom` needed:
+
+1. **Scout** — detects the board / projected screen as the largest bright,
+   roughly-rectangular region in view (classical CV, runs locally every poll).
+2. **Aim** — on a PTZ camera, drives pan/tilt/zoom in a closed feedback loop
+   until the target is centered and fills ~60% of the frame. It learns each
+   motor's direction from how the target actually moves (cameras disagree on
+   sign conventions) and freezes any axis that has no effect.
+3. **Lock** — normal stable-and-changed shipping; every shipped frame is
+   **digitally cropped to the detected target**, so handwriting arrives at
+   the fusion model at maximum resolution. If the target disappears for a
+   few seconds (someone re-aimed the camera, projector turned off), it zooms
+   out and re-scouts.
+
+On a fixed webcam (no motors) `--auto-aim` still helps: the digital crop
+alone ships the board region instead of the whole room. Use `--preview` to
+watch it work — the detected target is outlined in green.
 
 Code and diagrams captured off a board/slide are kept as fenced Markdown
 blocks (exact indentation, no paraphrasing) all the way into the rendered

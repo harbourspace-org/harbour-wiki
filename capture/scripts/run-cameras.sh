@@ -18,9 +18,9 @@ SLIDE_DEVICE="${3:-${SLIDE_DEVICE:-1}}"
 echo "[run-cameras] class '$CLASS' — board on device $BOARD_DEVICE, slide on device $SLIDE_DEVICE"
 echo "[run-cameras] Ctrl+C stops both."
 
-uv run lecture-camera --class "$CLASS" --modality board --device "$BOARD_DEVICE" &
+uv run lecture-camera --class "$CLASS" --modality board --device "$BOARD_DEVICE" --auto-aim &
 BOARD_PID=$!
-uv run lecture-camera --class "$CLASS" --modality slide --device "$SLIDE_DEVICE" &
+uv run lecture-camera --class "$CLASS" --modality slide --device "$SLIDE_DEVICE" --auto-aim &
 SLIDE_PID=$!
 
 trap 'echo; echo "[run-cameras] stopping both …"; kill "$BOARD_PID" "$SLIDE_PID" 2>/dev/null' INT TERM
