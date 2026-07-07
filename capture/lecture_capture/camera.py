@@ -180,6 +180,32 @@ def open_camera(device: int) -> cv2.VideoCapture:
     return cap
 
 
+def probe_devices(max_index: int = 10) -> list[tuple[int, int, int, bool]]:
+    """Try opening camera indices 0..max_index-1; report which actually work.
+
+    Returns (index, width, height, ptz_supported) for each device that opens
+    and yields a real frame — so `--list-devices` can tell a student which
+    index is the board webcam vs. a phone-as-webcam vs. a PTZ unit, without
+    guessing. Best-effort: a device busy in another process is skipped.
+    """
+    found: list[tuple[int, int, int, bool]] = []
+    for index in range(max_index):
+        backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_ANY
+        cap = cv2.VideoCapture(index, backend)
+        try:
+            if not cap.isOpened():
+                continue
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            h, w = frame.shape[:2]
+            ptz = PTZ(cap).supported
+            found.append((index, w, h, ptz))
+        finally:
+            cap.release()
+    return found
+
+
 def run_agent(opts: CameraOptions, send_frame) -> int:
     """Main loop. ``send_frame(b64) -> dict`` ships one frame; returns count sent."""
     cap = open_camera(opts.device)

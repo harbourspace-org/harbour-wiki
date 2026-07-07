@@ -118,6 +118,44 @@ creates the next number. `--new-lecture` forces a fresh one.
 | `--language` | `WHISPER_LANGUAGE` | autodetect | e.g. `en` |
 | `--device` | `AUDIO_DEVICE` | system mic | Index from `python -m sounddevice` |
 
+## Board + slide camera (optional, run alongside the audio)
+
+`lecture-camera` watches a webcam/PTZ camera and ships board or slide text
+into the SAME live lecture the audio recorder started — Knottra fuses
+speech + board + slide into one record. It only sends a frame once the view
+holds still and has actually changed, so it won't spam mid-write photos.
+
+A single camera can't reliably watch the whiteboard **and** the projector at
+once, so run **one process per physical camera** — one aimed at the board,
+one at the screen:
+
+```bash
+# find your camera indices first (probes 0-9, reports which open + resolution):
+uv run lecture-camera --list-devices
+
+# then run both feeds together (Ctrl+C stops both):
+scripts/run-cameras.sh algorithms-2026 0 1     # board=device 0, slide=device 1
+```
+
+Or run one manually: `uv run lecture-camera --class algorithms-2026 --modality board --device 0`.
+Validate the whole path (camera → gateway → vision LLM → event) without a
+real camera: add `--test-frame`. Aim a PTZ camera interactively with
+`--preview` (shows what it sees; `q` quits).
+
+| Flag | Notes |
+|---|---|
+| `--modality` | `board` \| `slide` \| `desk` — what this camera watches |
+| `--device` | Index from `--list-devices` |
+| `--track` | Nudge PTZ pan toward sustained motion (the teacher) |
+| `--pan` / `--tilt` / `--zoom` | Initial PTZ position (UVC cameras only) |
+| `--min-send` | Minimum seconds between shipped frames (default 20) |
+| `--test-frame` | Ship one synthetic board image and exit — no camera needed |
+| `--list-devices` | Probe indices 0-9, print which open, then exit |
+
+Code and diagrams captured off a board/slide are kept as fenced Markdown
+blocks (exact indentation, no paraphrasing) all the way into the rendered
+lecture notes — not flattened into prose.
+
 ## Capture quality
 
 The recorder is tuned for hard rooms: utterances are cut at natural pauses

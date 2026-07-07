@@ -25,7 +25,12 @@ def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
         prog="lecture-camera",
         description="Watch the lecture room with a (PTZ) camera and stream board/slide text into Harbour.Wiki.",
     )
-    parser.add_argument("--class", dest="class_id", required=True, help="Course id being recorded now")
+    parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="Probe camera indices 0-9, print which open (with resolution/PTZ), and exit",
+    )
+    parser.add_argument("--class", dest="class_id", required=False, help="Course id being recorded now")
     parser.add_argument("--class-title", default=os.getenv("CAPTURE_CLASS_TITLE") or None)
     parser.add_argument("--lecture-title", default=None, help="Used only if this starts the lecture")
     parser.add_argument(
@@ -54,6 +59,8 @@ def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
         help="No camera: ship one synthetic whiteboard frame and exit (validates the whole path)",
     )
     args = parser.parse_args(argv)
+    if not args.list_devices and not args.class_id:
+        parser.error("--class is required (unless using --list-devices)")
 
     cfg = Config(
         base_url=args.base_url.rstrip("/"),
@@ -78,11 +85,26 @@ def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
         tilt=args.tilt,
         zoom=args.zoom,
     )
-    return cfg, opts, bool(args.test_frame)
+    return cfg, opts, bool(args.test_frame), bool(args.list_devices)
 
 
 def main(argv: list[str] | None = None) -> int:
-    cfg, opts, test_frame = _build(argv)
+    cfg, opts, test_frame, list_devices = _build(argv)
+
+    if list_devices:
+        from .camera import probe_devices
+
+        print("[camera] probing devices 0-9 (a few seconds) …", flush=True)
+        found = probe_devices()
+        if not found:
+            print("[camera] no camera opened on any of indices 0-9.", flush=True)
+            return 1
+        for index, w, h, ptz in found:
+            tag = " (PTZ)" if ptz else ""
+            print(f"  --device {index}  →  {w}x{h}{tag}", flush=True)
+        print("[camera] pick one with --device N; run twice (board + slide) to cover both.", flush=True)
+        return 0
+
     gateway = Gateway(cfg)
 
     print(f"[camera] class '{cfg.class_id}' — asking {cfg.base_url} …", flush=True)
