@@ -227,9 +227,15 @@ def probe_devices(max_index: int = 10) -> list[tuple[int, int, int, bool]]:
     return found
 
 
-def run_agent(opts: CameraOptions, send_frame) -> int:
-    """Main loop. ``send_frame(b64) -> dict`` ships one frame; returns count sent."""
-    from .aiming import AimController, crop_to_bbox, detect_target
+def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
+    """Main loop. ``send_frame(b64) -> dict`` ships one frame; returns count sent.
+
+    ``locate_target(image_b64, target) -> dict`` (optional) is the server-side
+    aiming brain: Claude looks at a screenshot and returns the target's bbox.
+    With it, aiming decisions are LLM-driven; local CV remains the fallback
+    and the cheap per-poll drift-watch once the aim has settled.
+    """
+    from .aiming import AimController, LLMAimDetector, crop_to_bbox, detect_target
 
     cap = open_camera(opts.device)
     ptz = PTZ(cap)
@@ -238,9 +244,15 @@ def run_agent(opts: CameraOptions, send_frame) -> int:
         print(f"[camera] PTZ applied (supported={ptz.supported})", flush=True)
 
     aimer = AimController() if opts.auto_aim else None
+    llm_eyes = (
+        LLMAimDetector(locate_target, opts.modality)
+        if (opts.auto_aim and locate_target is not None)
+        else None
+    )
     if aimer is not None:
-        mode = "PTZ + digital crop" if ptz.supported else "digital crop only (no PTZ motors)"
-        print(f"[camera] auto-aim ON — {mode}", flush=True)
+        motors = "PTZ + digital crop" if ptz.supported else "digital crop only (no PTZ motors)"
+        brain = "Claude via /api/aim" if llm_eyes else "local CV only"
+        print(f"[camera] auto-aim ON — {motors}; detection: {brain}", flush=True)
     aim_settled = False
 
     policy = SnapshotPolicy(min_send_seconds=opts.min_send_seconds)
@@ -260,17 +272,31 @@ def run_agent(opts: CameraOptions, send_frame) -> int:
             now = time.monotonic()
 
             if aimer is not None:
-                bbox = detect_target(frame)
+                # While converging, ask the LLM brain (it knows WHICH bright
+                # rectangle is the board); once settled, watch with free local
+                # CV and only call the LLM again when something seems wrong.
+                if not aim_settled and llm_eyes is not None:
+                    bbox = llm_eyes.locate(frame) or detect_target(frame)
+                else:
+                    bbox = detect_target(frame)
                 if bbox is not None:
                     last_bbox = bbox
                 command = aimer.observe(bbox, frame.shape[1], frame.shape[0])
                 if command.lost:
-                    last_bbox = None
+                    # CV lost it — give Claude one look before re-scouting
+                    # (glare or a person in front can blind the CV heuristic
+                    # while the target is still perfectly visible).
+                    confirmed = llm_eyes.locate(frame) if llm_eyes else None
                     aimer.reset()
-                    if ptz.supported:
-                        print("[camera] target lost — zooming out to re-scout", flush=True)
-                        ptz.zoom_out_full()
-                    aim_settled = False
+                    if confirmed is not None:
+                        last_bbox = confirmed
+                        aim_settled = False  # re-converge on the confirmed spot
+                    else:
+                        last_bbox = None
+                        if ptz.supported:
+                            print("[camera] target lost — zooming out to re-scout", flush=True)
+                            ptz.zoom_out_full()
+                        aim_settled = False
                 elif command.moving and ptz.supported:
                     if aim_settled:
                         print("[camera] re-aiming …", flush=True)

@@ -109,6 +109,18 @@ class Gateway:
         response.raise_for_status()
         return response.json()
 
+    def locate_target(self, image_b64: str, target: str) -> dict:
+        """Ask the server's LLM where the board/screen is in a room shot.
+        Returns {found, bbox: [x,y,w,h] normalized 0..1 | None, confidence}."""
+        response = requests.post(
+            f"{self._cfg.base_url}/api/aim",
+            json={"target": target, "image": image_b64},
+            headers=self._headers,
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def flush(self) -> None:
         if self._session is None:
             return

@@ -148,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         return gateway.send_frame(image_b64, opts.modality, datetime.now(timezone.utc))
 
     try:
-        sent = run_agent(opts, send)
+        sent = run_agent(opts, send, locate_target=gateway.locate_target if opts.auto_aim else None)
         print(f"[camera] done — {sent} frames shipped.", flush=True)
     except KeyboardInterrupt:
         print("\n[camera] stopped.", flush=True)

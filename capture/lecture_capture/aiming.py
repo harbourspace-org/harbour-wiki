@@ -1,10 +1,14 @@
 """Autonomous aiming: find the board/screen in the frame and keep it framed.
 
-Three layers, separated for testability:
+The layers, separated for testability:
 
-- :func:`detect_target` — classical CV: the board (or projected slide) is the
-  largest bright, roughly-rectangular region in the room. No network, no LLM,
-  runs every poll on the lecture PC.
+- :class:`LLMAimDetector` — the aiming brain: ships a small screenshot to
+  Harbour.Wiki's ``/api/aim``, where Claude looks at the room and returns the
+  target's bbox. This is what actually UNDERSTANDS "that rectangle is the
+  whiteboard, the other one is the projector". Used while scouting/aiming.
+- :func:`detect_target` — classical CV fallback and cheap drift-watch: the
+  largest bright, roughly-rectangular region. No network; runs every poll
+  while locked so we notice the target moving/vanishing without LLM calls.
 - :class:`AimController` — a PURE feedback controller (no camera, no clock):
   given the detected bbox each observation, it emits per-axis step directions
   (pan/tilt/zoom) until the target is centered and fills the frame. It learns
@@ -17,6 +21,7 @@ Three layers, separated for testability:
 
 from __future__ import annotations
 
+from base64 import b64encode
 from dataclasses import dataclass, field
 
 import cv2
@@ -83,6 +88,50 @@ def crop_to_bbox(frame: np.ndarray, bbox: Bbox, margin: float = 0.08) -> np.ndar
     if x1 <= x0 or y1 <= y0:
         return frame
     return frame[y0:y1, x0:x1]
+
+
+_AIM_SHOT_WIDTH = 640  # aim screenshots are small: cheap, fast, good enough
+_AIM_SHOT_QUALITY = 60
+
+
+def encode_aim_shot(frame: np.ndarray) -> str:
+    """Downscaled JPEG base64 of the frame, sized for /api/aim calls."""
+    h, w = frame.shape[:2]
+    if w > _AIM_SHOT_WIDTH:
+        frame = cv2.resize(frame, (_AIM_SHOT_WIDTH, int(h * _AIM_SHOT_WIDTH / w)))
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, _AIM_SHOT_QUALITY])
+    if not ok:
+        raise RuntimeError("JPEG encoding failed")
+    return b64encode(buf.tobytes()).decode()
+
+
+class LLMAimDetector:
+    """Locate the target by asking the server's LLM (Claude) via /api/aim.
+
+    ``locate_target(image_b64, target) -> dict`` is injected (the Gateway
+    method in production; a stub in tests). Network/LLM failures return None —
+    the caller falls back to classical CV rather than crashing the recorder.
+    """
+
+    def __init__(self, locate_target, target: str) -> None:
+        self._locate = locate_target
+        self._target = target
+
+    def locate(self, frame: np.ndarray) -> Bbox | None:
+        try:
+            result = self._locate(encode_aim_shot(frame), self._target)
+        except Exception as error:  # noqa: BLE001 — aiming must never kill capture
+            print(f"[camera] aim query failed: {error}", flush=True)
+            return None
+        if not result.get("found") or not result.get("bbox"):
+            return None
+        fh, fw = frame.shape[:2]
+        nx, ny, nw, nh = (float(v) for v in result["bbox"])
+        x, y = int(nx * fw), int(ny * fh)
+        w, h = int(nw * fw), int(nh * fh)
+        if w < 4 or h < 4:
+            return None
+        return (max(0, x), max(0, y), min(w, fw - x), min(h, fh - y))
 
 
 @dataclass

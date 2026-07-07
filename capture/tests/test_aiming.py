@@ -10,8 +10,10 @@ import numpy as np
 
 from lecture_capture.aiming import (
     AimController,
+    LLMAimDetector,
     crop_to_bbox,
     detect_target,
+    encode_aim_shot,
 )
 
 W, H = 1280, 720
@@ -140,3 +142,40 @@ def test_edge_touching_target_does_not_zoom_in_further():
     # Big target already touching the left edge: zooming in would cut it off.
     cmd = controller.observe((0, int(0.2 * H), int(0.4 * W), int(0.5 * H)), W, H)
     assert cmd.zoom <= 0
+
+
+# --------------------------------------------------------------------------- #
+# LLMAimDetector — the Claude-backed detector (gateway stubbed)
+# --------------------------------------------------------------------------- #
+def test_llm_detector_converts_normalized_bbox_to_pixels():
+    calls = []
+
+    def fake_locate(image_b64, target):
+        calls.append((image_b64, target))
+        return {"found": True, "bbox": [0.25, 0.25, 0.5, 0.4], "confidence": 0.9}
+
+    detector = LLMAimDetector(fake_locate, "board")
+    bbox = detector.locate(room_with_board(300, 200, 500, 280))
+    assert bbox == (320, 180, 640, 288)  # 0.25*1280, 0.25*720, 0.5*1280, 0.4*720
+    assert calls[0][1] == "board"
+    assert len(calls[0][0]) > 100  # a real base64 JPEG went out
+
+
+def test_llm_detector_not_found_and_failure_return_none():
+    detector = LLMAimDetector(lambda i, t: {"found": False, "bbox": None}, "slide")
+    assert detector.locate(room_with_board(0, 0, 400, 300)) is None
+
+    def boom(i, t):
+        raise RuntimeError("network down")
+
+    assert LLMAimDetector(boom, "slide").locate(room_with_board(0, 0, 400, 300)) is None
+
+
+def test_aim_shot_is_downscaled():
+    import base64
+
+    shot = base64.b64decode(encode_aim_shot(room_with_board(300, 200, 500, 280)))
+    import cv2
+
+    decoded = cv2.imdecode(np.frombuffer(shot, np.uint8), cv2.IMREAD_COLOR)
+    assert decoded.shape[1] == 640  # width capped for cheap LLM calls

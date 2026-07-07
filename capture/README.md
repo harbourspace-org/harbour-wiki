@@ -158,21 +158,30 @@ real camera: add `--test-frame`. Aim a PTZ camera interactively with
 With `--auto-aim` the agent frames the board/screen itself — no manual
 `--pan/--tilt/--zoom` needed:
 
-1. **Scout** — detects the board / projected screen as the largest bright,
-   roughly-rectangular region in view (classical CV, runs locally every poll).
+1. **Scout** — ships a small screenshot to Harbour.Wiki's `/api/aim`, where
+   **Claude looks at the room** and returns the target's bounding box. This
+   is what distinguishes *the whiteboard* from *the projector screen* next to
+   it (`--modality board` vs `slide` decides what it looks for). Zoomed-out
+   wide shots give it the whole room to choose from.
 2. **Aim** — on a PTZ camera, drives pan/tilt/zoom in a closed feedback loop
-   until the target is centered and fills ~60% of the frame. It learns each
-   motor's direction from how the target actually moves (cameras disagree on
-   sign conventions) and freezes any axis that has no effect.
-3. **Lock** — normal stable-and-changed shipping; every shipped frame is
-   **digitally cropped to the detected target**, so handwriting arrives at
-   the fusion model at maximum resolution. If the target disappears for a
-   few seconds (someone re-aimed the camera, projector turned off), it zooms
-   out and re-scouts.
+   until the target is centered and fills ~60% of the frame, re-screenshotting
+   and re-asking as it moves. It learns each motor's direction from how the
+   target actually moves (cameras disagree on sign conventions) and freezes
+   any axis that has no effect.
+3. **Lock** — normal stable-and-changed shipping; a free local CV check (the
+   largest bright rectangle) watches for drift every poll, so no LLM calls
+   are burned while nothing changes. Every shipped frame is **digitally
+   cropped to the detected target**, so handwriting arrives at the fusion
+   model at maximum resolution. If the target seems gone, Claude gets one
+   confirming look (glare/people can blind the CV check) before the camera
+   zooms out and re-scouts.
 
-On a fixed webcam (no motors) `--auto-aim` still helps: the digital crop
-alone ships the board region instead of the whole room. Use `--preview` to
-watch it work — the detected target is outlined in green.
+The LLM key stays on the server (single-gateway rule) — the lecture PC only
+sends screenshots with its capture token. If `/api/aim` is unreachable the
+agent falls back to pure local CV. On a fixed webcam (no motors) `--auto-aim`
+still helps: the digital crop alone ships the board region instead of the
+whole room. Use `--preview` to watch it work — the detected target is
+outlined in green.
 
 Code and diagrams captured off a board/slide are kept as fenced Markdown
 blocks (exact indentation, no paraphrasing) all the way into the rendered
