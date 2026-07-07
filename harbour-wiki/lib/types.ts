@@ -41,5 +41,7 @@ export type EventIn = {
   timestamp: string;
   modality: string;
   content: string;
+  /** Base64 JPEG (no data: prefix) — Knottra's fusion LLM reads it directly. */
+  image_b64?: string;
   confidence: number;
 };

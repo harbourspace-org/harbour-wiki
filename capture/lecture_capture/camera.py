@@ -1,10 +1,12 @@
-"""Camera agent: watch the lecture room, ship NEW board content as text.
+"""Camera agent: watch the lecture room, ship NEW board content as an image.
 
 The loop mirrors how a human note-taker photographs a whiteboard:
 wait until the scene is STABLE (the teacher stepped away — nothing moving),
 check the view actually CHANGED since the last shot, then send one frame to
-Harbour.Wiki's /api/vision, where the server-side LLM transcribes it into a
-``board``/``slide``/``desk`` event for the same session the audio feeds.
+Harbour.Wiki's /api/vision, which forwards it AS AN IMAGE into the same
+Knottra session the audio feeds — the fusion model reads the photo directly,
+in the same call as whatever speech happens at that moment, rather than this
+agent (or the app) pre-extracting its text.
 
 The when-to-shoot decision lives in :class:`SnapshotPolicy` — pure state, no
 I/O — so it is unit-testable without a camera (see tests/test_camera.py).

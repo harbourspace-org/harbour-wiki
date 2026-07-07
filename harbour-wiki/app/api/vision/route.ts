@@ -2,15 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { ingest } from "@/lib/knottra";
-import { extractFrameText } from "@/lib/vision";
 
-// Camera-agent gateway: a lecture frame comes in, the server-side vision LLM
-// extracts its text, and the result is ingested into the SAME session the
-// audio recorder feeds — Knottra fuses speech + board into one record. The
-// lecture PC never holds the LLM key (same single-gateway rule as /api/ingest).
+// Camera-agent gateway: a lecture frame comes in and is forwarded, AS AN
+// IMAGE, into the SAME session the audio recorder feeds — Knottra's fusion
+// model reads the photo directly (alongside concurrent speech) rather than
+// this app pre-extracting its text. The lecture PC never holds the Knottra
+// key (same single-gateway rule as /api/ingest).
 
 // ~6 MB of base64 ≈ a 4.5 MB JPEG — far above the agent's 1280px q70 frames.
 const MAX_IMAGE_B64 = 6_000_000;
+
+// Capture-quality confidence (this camera frame is trustworthy input), not a
+// text-extraction confidence — Knottra's fuser does the reading now.
+const CAPTURE_CONFIDENCE: Record<string, number> = { board: 0.8, slide: 0.8, desk: 0.6 };
 
 const bodySchema = z.object({
   session: z.string().min(1).max(256),
@@ -37,27 +41,19 @@ export async function POST(req: NextRequest) {
     );
   }
   const { session, modality, image, timestamp } = parsed.data;
+  const imageB64 = image.replace(/^data:image\/\w+;base64,/, "");
 
   try {
-    const extraction = await extractFrameText(image.replace(/^data:image\/\w+;base64,/, ""), modality);
-    if (!extraction) {
-      return NextResponse.json({ status: "ok", extracted: false, ingested: 0 });
-    }
     await ingest(session, [
       {
         timestamp: timestamp ?? new Date().toISOString(),
         modality,
-        content: extraction.text,
-        confidence: extraction.confidence,
+        content: "",
+        image_b64: imageB64,
+        confidence: CAPTURE_CONFIDENCE[modality] ?? 0.7,
       },
     ]);
-    return NextResponse.json({
-      status: "ok",
-      extracted: true,
-      ingested: 1,
-      modality,
-      chars: extraction.text.length,
-    });
+    return NextResponse.json({ status: "ok", ingested: 1, modality });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 502 });
   }
