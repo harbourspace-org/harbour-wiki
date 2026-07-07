@@ -24,6 +24,11 @@ const SYSTEM =
   "e.g. [14:03].\n" +
   "- Use ONLY the provided content. Never invent facts, examples, or numbers.\n" +
   "- Merge fragments into readable prose; keep formulas and key terms exact.\n" +
+  "- EXCEPTION to the prose rule: if a concept's content already contains a " +
+  "fenced Markdown code block (```) — source code or a text-outline diagram " +
+  "captured from a board/slide — reproduce that fenced block VERBATIM, " +
+  "unchanged, in place. Never paraphrase, reformat, or merge code/diagrams " +
+  "into prose; surrounding sentences may still be rewritten normally.\n" +
   "- If material is garbled or low-confidence, summarize what is discernible " +
   "and note the uncertainty briefly.\n" +
   "- Plain text with paragraph breaks; no headings; no bullet lists except " +

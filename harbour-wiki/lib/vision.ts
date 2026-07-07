@@ -6,19 +6,30 @@ const LLM_BASE = process.env.LLM_BASE_URL ?? "https://opencode.ai/zen/v1";
 const LLM_KEY = process.env.LLM_API_KEY ?? "";
 const LLM_MODEL = process.env.LLM_MODEL ?? "claude-sonnet-4-6";
 
+const CODE_AND_DIAGRAM_RULE =
+  " If any source code is written or projected, reproduce it verbatim inside a " +
+  "fenced Markdown code block with a guessed language tag (```python, ```text, " +
+  "etc.), preserving exact indentation — never paraphrase code. If there is a " +
+  "diagram, flowchart, or tree, represent its structure as a small text outline " +
+  "inside a fenced ```text block (one node per line, arrows as '->', indentation " +
+  "for nesting) instead of prose.";
+
 const PROMPTS: Record<string, string> = {
   board:
     "This is a photo of a lecture whiteboard/blackboard. Transcribe EXACTLY what " +
     "is written on it (text, formulas, labeled diagrams described briefly). " +
-    "Preserve line structure. Do not add commentary or interpretation.",
+    "Preserve line structure. Do not add commentary or interpretation." +
+    CODE_AND_DIAGRAM_RULE,
   slide:
     "This is a photo of a projected lecture slide. Transcribe its text content " +
     "exactly (title, bullets, formulas). Describe figures in one short bracketed " +
-    "note each. No commentary.",
+    "note each. No commentary." +
+    CODE_AND_DIAGRAM_RULE,
   desk:
     "This is a photo of a lecturer showing something at their desk. Describe " +
     "briefly and factually what is being shown (object, screen content, action). " +
-    "2-3 sentences maximum.",
+    "2-3 sentences maximum." +
+    CODE_AND_DIAGRAM_RULE,
 };
 
 export type Extraction = { text: string; confidence: number };
