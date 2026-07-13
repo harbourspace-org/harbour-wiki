@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
-import { refoldSession } from "@/lib/knottra";
+import { DEFAULT_DOMAIN_PROMPT } from "@/lib/domainPrompt";
+import { refoldSession, setConfig } from "@/lib/knottra";
 import { lectureByNumber, resetLectureNote } from "@/lib/lectures";
 import { logUsage } from "@/lib/usage";
 
@@ -30,6 +31,10 @@ export async function POST(req: NextRequest) {
   if (!row) return NextResponse.json({ error: "Unknown lecture" }, { status: 404 });
 
   try {
+    // The session's stored fusion config is whatever was current when the
+    // lecture was RECORDED — push the current prompt first, otherwise the
+    // refold would faithfully reproduce the old prompt's flaws.
+    await setConfig(row.session_id, DEFAULT_DOMAIN_PROMPT);
     await refoldSession(row.session_id); // enqueue BEFORE emptying our copy
     await resetLectureNote(row.session_id);
     logUsage("web", "lecture_refold", course, { lecture });
