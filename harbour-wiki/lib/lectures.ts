@@ -231,6 +231,27 @@ export function isLive(l: LectureRow): boolean {
   return l.started_at !== null && l.finalized_at === null;
 }
 
+/** Audio older than this while LIVE means the recorder is probably dead. */
+const RECEIVING_STALE_MS = 60_000;
+
+/**
+ * True when a LIVE lecture actually received events recently. A LIVE badge
+ * with receiving=false is the "recorder died silently" signal — surface it
+ * instead of pretending everything is fine.
+ */
+export function isReceiving(l: LectureRow): boolean {
+  if (!isLive(l)) return false;
+  const seen = l.last_seen_at ?? l.started_at;
+  return seen !== null && Date.now() - new Date(seen).getTime() < RECEIVING_STALE_MS;
+}
+
+/** Seconds since the lecture last received an event (null when unknown). */
+export function silentForSeconds(l: LectureRow): number | null {
+  const seen = l.last_seen_at ?? l.started_at;
+  if (seen === null) return null;
+  return Math.round((Date.now() - new Date(seen).getTime()) / 1000);
+}
+
 /**
  * The course's known terminology: concept titles across all stored lecture
  * notes, most recently taught first. Fed to the recorder's transcriber as a

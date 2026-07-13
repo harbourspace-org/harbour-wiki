@@ -31,6 +31,14 @@ const DEFAULT_DOMAIN_PROMPT = [
   "actual content they carry, or omit them. Prefer extending an existing",
   "open concept over opening a near-duplicate, and do not open concepts for",
   "administrative chatter or jokes.",
+  "OFF-TOPIC GUARD: the microphone runs continuously, so windows may contain",
+  "material that is not course content at all — scheduling and administrative",
+  "talk, small talk before/after class, weather, personal conversations,",
+  "questions about deadlines or attendance. Emit NO concepts for such",
+  "material: if a window holds only off-topic speech, emit an empty concept",
+  "list rather than structuring it. Never include personal or private details",
+  "about identifiable people (names tied to grades, health, opinions) in any",
+  "concept.",
 ].join(" ");
 
 const eventSchema = z.object({

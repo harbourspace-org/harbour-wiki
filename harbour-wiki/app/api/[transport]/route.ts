@@ -9,10 +9,12 @@ import {
   getLectureNarrative,
   getLectureNote,
   isLive,
+  isReceiving,
   lectureByNumber,
   syncLectureNote,
 } from "@/lib/lectures";
 import { splitConspect } from "@/lib/narrative";
+import { logUsage } from "@/lib/usage";
 
 // MCP server — the PRIMARY student surface. Students address everything by
 // (course, lecture number); raw session ids never leak. Tools return the
@@ -94,6 +96,7 @@ const handler = createMcpHandler(
         inputSchema: {},
       },
       async () => {
+        logUsage("mcp", "list_courses");
         const courses = await listCourses();
         const out = await Promise.all(
           courses.map(async (c) => {
@@ -121,6 +124,7 @@ const handler = createMcpHandler(
         inputSchema: { course: z.string().describe("Course id from list_courses") },
       },
       async ({ course }) => {
+        logUsage("mcp", "list_lectures", course);
         const rows = await courseLectures(course);
         if (rows.length === 0) return json({ error: "Unknown or empty course" });
         const out = await Promise.all(
@@ -131,6 +135,8 @@ const handler = createMcpHandler(
               title: l.label ?? `Lecture ${l.position}`,
               started_at: l.started_at,
               live: isLive(l),
+              // live but receiving=false → the recorder likely died mid-class
+              receiving: isReceiving(l),
               concepts: note?.concepts.length ?? 0,
             };
           }),
@@ -156,19 +162,35 @@ const handler = createMcpHandler(
         },
       },
       async ({ course, lecture }) => {
+        logUsage("mcp", "get_lecture", course, { lecture });
         const row = await lectureByNumber(course, lecture);
         if (!row) return json({ error: "Unknown lecture" });
         const result = await getLectureNarrative(course, row.session_id);
         if (!result) return json({ error: "No notes yet — nothing fused for this lecture" });
         const { narrative, note } = result;
+        // Strip the "Check yourself:" block: shipping answers inline defeats
+        // active recall — quizzes go through get_quiz_questions instead.
+        const conspect = narrative ? splitConspect(narrative) : null;
+        const narrativeOut = conspect
+          ? [
+              conspect.body,
+              conspect.takeaways.length
+                ? "Remember:\n" + conspect.takeaways.map((t) => `• ${t}`).join("\n")
+                : "",
+            ]
+              .filter(Boolean)
+              .join("\n\n")
+          : "(narrative not generated yet)";
         return json({
           course,
           lecture,
           title: row.label,
           live: isLive(row),
+          receiving: isReceiving(row),
           started_at: row.started_at,
           cursor: note.cursor,
-          narrative: narrative ?? "(narrative not generated yet)",
+          narrative: narrativeOut,
+          quiz_questions_available: conspect?.quiz.length ?? 0,
           concepts: note.concepts.map(conceptView),
           links: note.links.map((l) => ({ from: l.from_concept, to: l.to_concept, kind: l.kind })),
         });
@@ -190,6 +212,7 @@ const handler = createMcpHandler(
         },
       },
       async ({ course, lecture, since }) => {
+        logUsage("mcp", "get_lecture_updates", course, { lecture });
         const row = await lectureByNumber(course, lecture);
         if (!row) return json({ error: "Unknown lecture" });
         const delta = await getRecord(row.session_id, since);
@@ -226,6 +249,7 @@ const handler = createMcpHandler(
         },
       },
       async ({ course, lecture, query, k }) => {
+        logUsage("mcp", "search_lecture", course, { lecture });
         const row = await lectureByNumber(course, lecture);
         if (!row) return json({ error: "Unknown lecture" });
         const r = await searchRecord(row.session_id, query, k ?? 8);
@@ -257,6 +281,7 @@ const handler = createMcpHandler(
         },
       },
       async ({ course, query, k }) => {
+        logUsage("mcp", "search_course", course);
         const rows = await courseLectures(course);
         if (rows.length === 0) return json({ error: "Unknown or empty course" });
         const per = await Promise.all(
@@ -288,6 +313,7 @@ const handler = createMcpHandler(
         },
       },
       async ({ course, concept_id }) => {
+        logUsage("mcp", "get_concept", course);
         const graph = await buildCourseGraph(course);
         const c = graph?.conceptsById.get(concept_id);
         if (!graph || !c) return json({ error: "Concept not found" });
@@ -327,6 +353,7 @@ const handler = createMcpHandler(
         },
       },
       async ({ course, lecture }) => {
+        logUsage("mcp", "get_quiz_questions", course, { lecture });
         const res = await collectQuiz(course, lecture);
         if ("error" in res) return json({ error: res.error });
         return json({
@@ -361,6 +388,7 @@ const handler = createMcpHandler(
         },
       },
       async ({ course, lecture }) => {
+        logUsage("mcp", "get_quiz_answers", course, { lecture });
         const res = await collectQuiz(course, lecture);
         if ("error" in res) return json({ error: res.error });
         return json({

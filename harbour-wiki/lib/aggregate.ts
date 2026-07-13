@@ -6,7 +6,14 @@
 
 import { listUserLinks } from "./annotations";
 import { getCourse, type Course } from "./courses";
-import { courseLectures, getLectureNarrative, getLectureNote, isLive } from "./lectures";
+import {
+  courseLectures,
+  getLectureNarrative,
+  getLectureNote,
+  isLive,
+  isReceiving,
+  silentForSeconds,
+} from "./lectures";
 import { isLegacyConspect } from "./narrative";
 import type { ConceptNode } from "./types";
 
@@ -22,6 +29,10 @@ export type Lecture = {
   number: number;
   label: string;
   live: boolean;
+  /** LIVE and events arrived within the last minute — the recorder is alive. */
+  receiving: boolean;
+  /** Seconds since the last ingested event (for the stale-LIVE warning). */
+  silentFor: number | null;
   narrative: string | null;
   concepts: AggConcept[];
 };
@@ -94,6 +105,8 @@ export async function buildCourseGraph(courseId: string): Promise<CourseGraph | 
       number: row.position,
       label,
       live: isLive(row),
+      receiving: isReceiving(row),
+      silentFor: silentForSeconds(row),
       narrative: note?.narrative ?? null,
       concepts,
     });

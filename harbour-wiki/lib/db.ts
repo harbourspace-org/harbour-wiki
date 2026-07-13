@@ -70,6 +70,17 @@ CREATE TABLE IF NOT EXISTS harbour_wiki.user_link (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_user_link_course ON harbour_wiki.user_link (course_id);
+-- Usage/feedback log: which surfaces and tools students actually use, plus
+-- their votes — the data the feedback experiment is judged on.
+CREATE TABLE IF NOT EXISTS harbour_wiki.usage_event (
+  id bigserial PRIMARY KEY,
+  at timestamptz NOT NULL DEFAULT now(),
+  surface text NOT NULL,        -- mcp | web | ask | feedback
+  name text NOT NULL,           -- tool/action name (get_lecture, course_view, vote…)
+  course text,
+  meta jsonb
+);
+CREATE INDEX IF NOT EXISTS ix_usage_event_at ON harbour_wiki.usage_event (at);
 `;
 
 export function ready(): Promise<void> {

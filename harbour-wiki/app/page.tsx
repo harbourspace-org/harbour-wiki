@@ -1,7 +1,8 @@
 import Link from "next/link";
 
+import { LiveBadge } from "@/components/LiveBadge";
 import { listCourses } from "@/lib/courses";
-import { courseLectures, isLive } from "@/lib/lectures";
+import { courseLectures, isLive, isReceiving, silentForSeconds } from "@/lib/lectures";
 
 // Without this, Next prerenders "/" at BUILD time — no DB in the Docker build,
 // so an empty course list gets baked into static HTML. This is a live index.
@@ -12,7 +13,14 @@ export default async function Home() {
   const enriched = await Promise.all(
     courses.map(async (c) => {
       const lectures = await courseLectures(c.id).catch(() => []);
-      return { ...c, lectures: lectures.length, live: lectures.some(isLive) };
+      const liveRow = lectures.find(isLive) ?? null;
+      return {
+        ...c,
+        lectures: lectures.length,
+        live: liveRow !== null,
+        receiving: liveRow !== null && isReceiving(liveRow),
+        silentFor: liveRow ? silentForSeconds(liveRow) : null,
+      };
     }),
   );
 
@@ -39,7 +47,7 @@ export default async function Home() {
               <span className="muted">
                 — {c.lectures} lecture{c.lectures === 1 ? "" : "s"}
               </span>
-              {c.live && <span className="live-badge">LIVE</span>}
+              <LiveBadge live={c.live} receiving={c.receiving} silentFor={c.silentFor} />
             </li>
           ))}
         </ul>

@@ -1,13 +1,18 @@
 import Link from "next/link";
 
+import { AskBox } from "@/components/AskBox";
 import { CourseSearch } from "@/components/CourseSearch";
+import { FeedbackButtons } from "@/components/FeedbackButtons";
+import { LiveBadge } from "@/components/LiveBadge";
 import { Md } from "@/components/Markdown";
 import { buildCourseGraph } from "@/lib/aggregate";
 import { splitConspect } from "@/lib/narrative";
+import { logUsage } from "@/lib/usage";
 
 export default async function CoursePage({ params }: { params: Promise<{ courseId: string }> }) {
   const { courseId } = await params;
   const graph = await buildCourseGraph(courseId).catch(() => null);
+  if (graph) logUsage("web", "course_view", courseId);
 
   if (!graph) {
     return (
@@ -47,13 +52,18 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
         <CourseSearch courseId={courseId} />
       </aside>
 
+      <aside className="infobox">
+        <span className="label">Ask the course</span>
+        <AskBox courseId={courseId} />
+      </aside>
+
       <nav className="toc">
         <div className="toc-title">Contents</div>
         <ol>
           {graph.lectures.map((lec) => (
             <li key={lec.sessionId}>
               <a href={`#l${lec.number}`}>{lec.label}</a>
-              {lec.live && <span className="live-badge">LIVE</span>}
+              <LiveBadge live={lec.live} receiving={lec.receiving} silentFor={lec.silentFor} />
             </li>
           ))}
         </ol>
@@ -65,7 +75,7 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
         <section key={lec.sessionId} id={`l${lec.number}`}>
           <h2>
             {lec.number}. {lec.label}
-            {lec.live && <span className="live-badge">LIVE</span>}
+            <LiveBadge live={lec.live} receiving={lec.receiving} silentFor={lec.silentFor} />
           </h2>
           {conspect && conspect.takeaways.length > 0 && (
             <div className="takeaways">
@@ -122,6 +132,8 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
         </section>
         );
       })}
+
+      <FeedbackButtons courseId={courseId} />
 
       <p className="footnote">
         Notes are fused from live capture by the Knottra engine and kept here. Ask questions

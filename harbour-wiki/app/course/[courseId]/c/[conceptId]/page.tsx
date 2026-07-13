@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { Annotations } from "@/components/Annotations";
+import { DeleteConcept } from "@/components/DeleteConcept";
 import { Md } from "@/components/Markdown";
 import { buildCourseGraph } from "@/lib/aggregate";
 
@@ -110,6 +111,10 @@ export default async function ConceptPage({
         <h2>Notes</h2>
         <Annotations courseId={courseId} conceptId={conceptId} />
       </section>
+
+      <p className="footnote">
+        <DeleteConcept courseId={courseId} conceptId={conceptId} />
+      </p>
     </main>
   );
 }

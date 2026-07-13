@@ -302,3 +302,31 @@ li { margin: 0.2em 0; }
 .md th, .md td { border: 1px solid var(--rule); padding: 0.25em 0.6em; }
 .md .katex { font-size: 1.04em; }
 .selfcheck details .md { margin: 0.3em 0 0.4em 1.1em; color: var(--text-soft); }
+
+/* Stale LIVE: marked live but no events arriving (recorder likely dead). */
+.live-badge.stale { color: #b45309; border-color: #b45309; }
+.live-badge.stale::before { content: ""; }
+
+/* ---------- ask box & feedback ---------- */
+.ask-answer { margin-top: 0.6rem; }
+.ask-sources { margin-top: 0.35rem; font-size: 0.85rem; }
+.feedback-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 2.2rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--rule);
+  font-size: 0.9rem;
+  color: var(--text-soft);
+}
+.feedback-row button.btn { padding: 0.1em 0.55em; }
+.delete-concept {
+  background: none;
+  border: none;
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0;
+}
+.delete-concept:hover { color: #b91c1c; text-decoration: underline; }

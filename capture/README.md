@@ -75,7 +75,22 @@ python -m venv .venv && source .venv/bin/activate && pip install -e .
 > service. If the app leaves `/api/ingest` open (no token configured), you can
 > leave it empty for local dev.
 
-## Run
+## Run (supervised — the recommended way)
+
+```bash
+uv run lecturectl start --class algorithms-2026 --lecture-title "Hashing"
+uv run lecturectl status   # pid, session, last log lines
+uv run lecturectl stop     # graceful stop + GUARANTEED flush/finalize
+```
+
+`lecturectl` runs the recorder as a detached, supervised process: no terminal
+or agent session owns it (closing things doesn't kill the lecture), a crash
+restarts it automatically into the SAME lecture, and `stop` both signals the
+recorder's own flush path and sends a belt-and-braces flush through the
+gateway — the lecture can't be left dangling as LIVE. State lives in
+`~/.lecture-capture/` (pid, session, log).
+
+## Run (foreground)
 
 ```bash
 # with uv:

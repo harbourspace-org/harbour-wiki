@@ -134,6 +134,16 @@ def main(argv: list[str] | None = None) -> int:
         f"[capture] {verb} lecture #{started.lecture} (session {started.session})",
         flush=True,
     )
+    # Under lecturectl supervision: record which session we stream into, so
+    # `lecturectl stop` can send a belt-and-braces flush for it.
+    state_file = os.environ.get("LECTURE_STATE_FILE")
+    if state_file:
+        import json
+        from pathlib import Path
+
+        Path(state_file).write_text(
+            json.dumps({"session": started.session, "lecture": started.lecture})
+        )
     if started.vocabulary:
         transcriber.set_context(build_context(cfg.context, started.vocabulary))
         print(

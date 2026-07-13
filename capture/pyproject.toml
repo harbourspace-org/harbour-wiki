@@ -16,6 +16,7 @@ dependencies = [
 lecture-capture = "lecture_capture.cli:main"
 lecture-simulate = "lecture_capture.simulate:main"
 lecture-camera = "lecture_capture.camera_cli:main"
+lecturectl = "lecture_capture.control:main"
 
 [build-system]
 requires = ["hatchling"]
