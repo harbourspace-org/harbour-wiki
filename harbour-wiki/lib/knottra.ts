@@ -49,3 +49,10 @@ export async function flush(session: string): Promise<void> {
   const r = await req(`/v1/sessions/${encodeURIComponent(session)}/flush`, { method: "POST" });
   if (!r.ok) throw new Error(`Knottra flush ${r.status}`);
 }
+
+/** Regenerate the session's projection from raw events with the CURRENT
+ * fusion prompt (async — Knottra's worker re-fuses in the background). */
+export async function refoldSession(session: string): Promise<void> {
+  const r = await req(`/v1/sessions/${encodeURIComponent(session)}/refold`, { method: "POST" });
+  if (!r.ok) throw new Error(`Knottra refold ${r.status}`);
+}

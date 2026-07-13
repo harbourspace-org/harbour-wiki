@@ -4,6 +4,7 @@ import { AskBox } from "@/components/AskBox";
 import { CourseSearch } from "@/components/CourseSearch";
 import { FeedbackButtons } from "@/components/FeedbackButtons";
 import { LiveBadge } from "@/components/LiveBadge";
+import { LiveRefresh } from "@/components/LiveRefresh";
 import { Md } from "@/components/Markdown";
 import { buildCourseGraph } from "@/lib/aggregate";
 import { splitConspect } from "@/lib/narrative";
@@ -33,6 +34,7 @@ export default async function CoursePage({ params }: { params: Promise<{ courseI
 
   return (
     <main className="shell">
+      {graph.lectures.some((l) => l.live) && <LiveRefresh courseId={courseId} />}
       <header className="masthead">
         <span className="wordmark">
           Harbour<b>.</b>Wiki

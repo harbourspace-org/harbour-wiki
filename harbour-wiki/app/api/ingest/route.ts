@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
+import { correctTranscript } from "@/lib/correct";
 import { upsertCourse } from "@/lib/courses";
 import { flush, ingest, setConfig } from "@/lib/knottra";
 import {
@@ -123,7 +124,17 @@ export async function POST(req: NextRequest) {
     const courseId = parsed.data.courseId ?? session.split("--l")[0];
 
     if (events && events.length > 0) {
-      await ingest(session, events);
+      // ASR post-correction: fix mishearings in speech events with a small
+      // model + course vocabulary before they reach fusion. Best-effort —
+      // failures/timeouts pass the original text through.
+      const corrected = await Promise.all(
+        events.map(async (ev) =>
+          ev.modality === "speech"
+            ? { ...ev, content: await correctTranscript(ev.content, courseId) }
+            : ev,
+        ),
+      );
+      await ingest(session, corrected);
       // Slide the resume window: the lecture is demonstrably still going.
       await touchLecture(session);
     }

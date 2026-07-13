@@ -115,6 +115,19 @@ export async function startLecture(
   return { session, lecture: next, resumed: false };
 }
 
+/** Empty the stored note so the next sync rebuilds it from Knottra's fresh
+ * projection — used together with a refold (old concept ids don't survive a
+ * re-fuse, so merging would keep stale copies alongside the new ones). */
+export async function resetLectureNote(session: string): Promise<void> {
+  await q(
+    `UPDATE harbour_wiki.lecture_note
+     SET cursor = 0, concepts = '{}'::jsonb, links = '{}'::jsonb,
+         narrative = NULL, narrative_cursor = 0, narrative_at = NULL
+     WHERE session_id = $1`,
+    [session],
+  );
+}
+
 /** Mark the lecture as actively receiving events — slides the resume window. */
 export async function touchLecture(session: string): Promise<void> {
   await q(`UPDATE harbour_wiki.course_session SET last_seen_at = now() WHERE session_id = $1`, [
@@ -218,8 +231,11 @@ export async function getLectureNote(
     : null;
   const stillSyncing = finalizedAgo === null || finalizedAgo < POST_FINAL_SYNC_MS;
   const stale = !note || Date.now() - new Date(note.updated_at).getTime() > SYNC_STALE_MS;
+  // A reset note (cursor 0, refold in flight) re-syncs regardless of age —
+  // Knottra is rebuilding its projection and we pull it as it lands.
+  const rebuilding = note !== undefined && Number(note.cursor) === 0;
 
-  if (stillSyncing && stale) {
+  if ((stillSyncing || rebuilding) && stale) {
     const synced = await syncLectureNote(courseId, session);
     if (synced) return synced;
   }
