@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
+import { runWithRequest } from "@/lib/requestContext";
 import { logUsage } from "@/lib/usage";
 
 const bodySchema = z.object({
@@ -11,6 +12,10 @@ const bodySchema = z.object({
 });
 
 export async function POST(req: NextRequest) {
+  return runWithRequest(req, () => handle(req));
+}
+
+async function handle(req: NextRequest) {
   const parsed = bodySchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
     return NextResponse.json({ error: "Invalid body" }, { status: 400 });

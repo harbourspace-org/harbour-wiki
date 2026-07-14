@@ -4,6 +4,7 @@ import { courseSessions } from "@/lib/courses";
 import { searchRecord } from "@/lib/knottra";
 import { groundedAnswer } from "@/lib/llm";
 import type { SearchHit } from "@/lib/types";
+import { runWithRequest } from "@/lib/requestContext";
 import { logUsage } from "@/lib/usage";
 
 // Grounded Q&A. Two scopes:
@@ -12,6 +13,10 @@ import { logUsage } from "@/lib/usage";
 //     so students without a paid Claude plan get the same capability).
 
 export async function POST(req: NextRequest) {
+  return runWithRequest(req, () => handle(req));
+}
+
+async function handle(req: NextRequest) {
   const { session, course, question } = await req.json().catch(() => ({}));
   if (!question || (!session && !course)) {
     return NextResponse.json(

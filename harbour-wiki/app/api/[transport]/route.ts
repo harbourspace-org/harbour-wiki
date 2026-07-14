@@ -14,6 +14,7 @@ import {
   syncLectureNote,
 } from "@/lib/lectures";
 import { splitConspect } from "@/lib/narrative";
+import { runWithRequest } from "@/lib/requestContext";
 import { logUsage } from "@/lib/usage";
 
 // MCP server — the PRIMARY student surface. Students address everything by
@@ -420,7 +421,9 @@ async function guarded(req: Request): Promise<Response> {
       });
     }
   }
-  return handler(req);
+  // Bind the caller's identity proxy (salted IP hash) for this request so
+  // tool handlers' logUsage calls can count distinct users.
+  return runWithRequest(req, () => handler(req));
 }
 
 export { guarded as GET, guarded as POST, guarded as DELETE };
