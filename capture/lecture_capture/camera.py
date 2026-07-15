@@ -47,6 +47,7 @@ class CameraOptions:
     tilt: float | None
     zoom: float | None
     auto_aim: bool = False  # find the board/screen and frame it autonomously
+    flip_180: bool = False  # camera physically mounted upside down
 
 
 # --------------------------------------------------------------------------- #
@@ -152,7 +153,17 @@ def make_test_board() -> np.ndarray:
 # Hardware shell
 # --------------------------------------------------------------------------- #
 class PTZ:
-    """Best-effort UVC pan/tilt/zoom via OpenCV properties. No-ops if absent."""
+    """Best-effort UVC pan/tilt/zoom.
+
+    On Windows, ``cap`` is normally a winptz.DirectShowCamera — a single
+    DirectShow session doing both capture AND control, so ``cap.cam`` is
+    already the bound IAMCameraControl interface (see winptz.py for why: two
+    separate sessions caused video glitches whenever a control command
+    fired). Falls back to cv2's own CAP_PROP_PAN/TILT (some cameras genuinely
+    expose pan/tilt that way) if ``cap`` has no ``.cam`` — e.g. off Windows,
+    or if the unified session failed to open and camera.py fell back to
+    plain cv2.VideoCapture. No-ops (digital crop only) if neither answers.
+    """
 
     # Hardware step sizes per AimController unit step. UVC units vary wildly
     # between cameras; the controller's sign/stall learning absorbs the rest.
@@ -160,12 +171,28 @@ class PTZ:
     TILT_STEP = 1.0
     ZOOM_STEP = 10.0
 
-    def __init__(self, cap: cv2.VideoCapture) -> None:
+    def __init__(self, cap, device: int) -> None:
         self._cap = cap
-        # UVC PTZ properties read back -1 on cameras that lack motors.
-        self.supported = cap.get(cv2.CAP_PROP_PAN) != -1.0
+        self._cam = getattr(cap, "cam", None)
+        if self._cam is not None:
+            self.supported = True
+        else:
+            # Plain cv2.VideoCapture (unified session unavailable, or off
+            # Windows) — some cameras genuinely expose pan/tilt this way.
+            self.supported = cap.get(cv2.CAP_PROP_PAN) != -1.0
 
     def apply(self, pan: float | None, tilt: float | None, zoom: float | None) -> None:
+        if self._cam is not None:
+            if pan is not None or tilt is not None:
+                print(
+                    "[camera] --pan/--tilt ignored: this camera only supports relative moves",
+                    flush=True,
+                )
+            if zoom is not None:
+                from .winptz import FLAGS_MANUAL, ZOOM, ZOOM_MAX, ZOOM_MIN
+
+                self._cam.Set(ZOOM, max(ZOOM_MIN, min(ZOOM_MAX, int(zoom))), FLAGS_MANUAL)
+            return
         if pan is not None:
             self._cap.set(cv2.CAP_PROP_PAN, pan)
         if tilt is not None:
@@ -173,25 +200,70 @@ class PTZ:
         if zoom is not None:
             self._cap.set(cv2.CAP_PROP_ZOOM, zoom)
 
+    def _nudge_relative(self, prop: int, cv2_prop: int, step: float) -> None:
+        if step == 0:
+            return
+        if self._cam is not None:
+            from .winptz import FLAGS_MANUAL, PULSE_SECONDS
+
+            direction = 1 if step > 0 else -1
+            self._cam.Set(prop, direction, FLAGS_MANUAL)
+            time.sleep(PULSE_SECONDS)
+            self._cam.Set(prop, 0, FLAGS_MANUAL)
+        else:
+            current = self._cap.get(cv2_prop)
+            self._cap.set(cv2_prop, current + step)
+
     def nudge_pan(self, step: float) -> None:
-        current = self._cap.get(cv2.CAP_PROP_PAN)
-        self._cap.set(cv2.CAP_PROP_PAN, current + step)
+        from .winptz import PAN_RELATIVE
+
+        self._nudge_relative(PAN_RELATIVE, cv2.CAP_PROP_PAN, step)
 
     def nudge_tilt(self, step: float) -> None:
-        current = self._cap.get(cv2.CAP_PROP_TILT)
-        self._cap.set(cv2.CAP_PROP_TILT, current + step)
+        from .winptz import TILT_RELATIVE
+
+        self._nudge_relative(TILT_RELATIVE, cv2.CAP_PROP_TILT, step)
 
     def nudge_zoom(self, step: float) -> None:
-        current = self._cap.get(cv2.CAP_PROP_ZOOM)
-        self._cap.set(cv2.CAP_PROP_ZOOM, max(0.0, current + step))
+        if self._cam is not None:
+            from .winptz import FLAGS_MANUAL, ZOOM, ZOOM_MAX, ZOOM_MIN
+
+            current, _ = self._cam.Get(ZOOM)
+            self._cam.Set(ZOOM, max(ZOOM_MIN, min(ZOOM_MAX, current + int(step))), FLAGS_MANUAL)
+        else:
+            current = self._cap.get(cv2.CAP_PROP_ZOOM)
+            self._cap.set(cv2.CAP_PROP_ZOOM, max(0.0, current + step))
 
     def zoom_out_full(self) -> None:
         """Widest view — used when the target is lost and we re-scout."""
-        self._cap.set(cv2.CAP_PROP_ZOOM, 0.0)
+        if self._cam is not None:
+            from .winptz import FLAGS_MANUAL, ZOOM, ZOOM_MIN
+
+            self._cam.Set(ZOOM, ZOOM_MIN, FLAGS_MANUAL)
+        else:
+            self._cap.set(cv2.CAP_PROP_ZOOM, 0.0)
 
 
-def open_camera(device: int) -> cv2.VideoCapture:
-    # DirectShow on Windows: exposes UVC PTZ properties and avoids MSMF stalls.
+def open_camera(device: int):
+    """Prefer the unified DirectShow session on Windows (capture + control in
+    one graph — see winptz.py). Falls back to plain cv2.VideoCapture (no PTZ
+    control session at all, digital crop only) off Windows or if the unified
+    path fails to open for any reason."""
+    if platform.system() == "Windows":
+        try:
+            from .winptz import DirectShowCamera
+
+            cam = DirectShowCamera(device)
+            ok, _ = cam.read()
+            if ok:
+                return cam
+            cam.release()
+        except Exception as error:  # noqa: BLE001 — pygrabber/comtypes missing, etc.
+            print(f"[camera] unified DirectShow capture unavailable ({error}); falling back to cv2", flush=True)
+    return _open_cv2_camera(device)
+
+
+def _open_cv2_camera(device: int) -> cv2.VideoCapture:
     backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_ANY
     cap = cv2.VideoCapture(device, backend)
     if not cap.isOpened():
@@ -211,16 +283,16 @@ def probe_devices(max_index: int = 10) -> list[tuple[int, int, int, bool]]:
     """
     found: list[tuple[int, int, int, bool]] = []
     for index in range(max_index):
-        backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_ANY
-        cap = cv2.VideoCapture(index, backend)
         try:
-            if not cap.isOpened():
-                continue
+            cap = open_camera(index)
+        except Exception:  # noqa: BLE001 — no device at this index, or busy elsewhere
+            continue
+        try:
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
             h, w = frame.shape[:2]
-            ptz = PTZ(cap).supported
+            ptz = PTZ(cap, index).supported
             found.append((index, w, h, ptz))
         finally:
             cap.release()
@@ -235,25 +307,52 @@ def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
     With it, aiming decisions are LLM-driven; local CV remains the fallback
     and the cheap per-poll drift-watch once the aim has settled.
     """
-    from .aiming import AimController, LLMAimDetector, crop_to_bbox, detect_target
+    from .aiming import AimController, LLMAimDetector, crop_to_bbox, detect_person, detect_target
+
+    is_desk = opts.modality == "desk"
+    detect_fn = detect_person if is_desk else detect_target
 
     cap = open_camera(opts.device)
-    ptz = PTZ(cap)
+    ptz = PTZ(cap, opts.device)
     if any(v is not None for v in (opts.pan, opts.tilt, opts.zoom)):
         ptz.apply(opts.pan, opts.tilt, opts.zoom)
         print(f"[camera] PTZ applied (supported={ptz.supported})", flush=True)
 
     aimer = AimController() if opts.auto_aim else None
+    # Desk mode tracks a MOVING person: the local YOLO detector owns aiming
+    # every poll. The LLM's job is describing content downstream in Knottra,
+    # not positioning — so it's never consulted here for desk.
     llm_eyes = (
         LLMAimDetector(locate_target, opts.modality)
-        if (opts.auto_aim and locate_target is not None)
+        if (opts.auto_aim and locate_target is not None and not is_desk)
         else None
     )
     if aimer is not None:
         motors = "PTZ + digital crop" if ptz.supported else "digital crop only (no PTZ motors)"
-        brain = "Claude via /api/aim" if llm_eyes else "local CV only"
+        brain = "local YOLO person detector" if is_desk else ("Claude via /api/aim" if llm_eyes else "local CV only")
         print(f"[camera] auto-aim ON — {motors}; detection: {brain}", flush=True)
     aim_settled = False
+    already_zoomed_out = False  # avoid re-sending zoom_out_full() every poll while lost
+    desk_lost_episodes = 0  # consecutive "lost" firings with no reacquire — sustained-absence counter
+    DESK_LOST_EPISODES_BEFORE_ZOOM_OUT = 3  # ~3 * _MAX_MISSES(8) polls of nothing, not a brief turn/occlusion
+    # Desk-mode pan/tilt: bang-bang, not the AimController's incremental axis
+    # logic — this hardware's pan/tilt only does large, roughly fixed-size
+    # jumps regardless of pulse duration, which reads as "wrong direction" or
+    # "no progress" to smooth incremental control and freezes the axis within
+    # a few corrections. Instead: one pulse when clearly off-center, then wait
+    # for the motor to settle and the next detection to confirm before
+    # judging again. Direction convention confirmed empirically (keyboard
+    # test): cx > 0.5 (right of center) -> pan +1; cy < 0.5 (above center) ->
+    # tilt +1.
+    DESK_CENTER_DEADBAND = 0.15
+    DESK_PAN_TILT_COOLDOWN_SECONDS = 2.0
+    desk_pan_tilt_ready_at = float("-inf")
+    # YOLO (desk mode) costs ~200-300ms even on a modest CPU — running it every
+    # poll caps the preview at a few FPS. Throttle detection; the preview still
+    # redraws every loop tick regardless. detect_target (board/slide) is cheap
+    # CV, no need to throttle it.
+    DETECT_INTERVAL_SECONDS = 1.0
+    last_detect_at = float("-inf")
 
     policy = SnapshotPolicy(min_send_seconds=opts.min_send_seconds)
     prev: np.ndarray | None = None
@@ -268,19 +367,52 @@ def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
                 print("[camera] frame grab failed; retrying …", flush=True)
                 time.sleep(1)
                 continue
+            if opts.flip_180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
             cur = small_gray(frame)
             now = time.monotonic()
 
-            if aimer is not None:
+            # Repaint BEFORE the (possibly slow, ~200-300ms) detection call below —
+            # cv2.waitKey() is what pumps the window's message loop on Windows, so
+            # painting only at the end of the iteration left the window looking
+            # blank/black for the duration of every detection call.
+            if opts.preview:
+                shown = frame.copy()
+                if aimer is not None and last_bbox:
+                    x, y, w, h = last_bbox
+                    cv2.rectangle(shown, (x, y), (x + w, y + h), (0, 200, 0), 3)
+                cv2.imshow("lecture-camera (q to quit)", cv2.resize(shown, (960, 540)))
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+
+            run_detection = not is_desk or (now - last_detect_at >= DETECT_INTERVAL_SECONDS)
+            if aimer is not None and run_detection:
+                last_detect_at = now
                 # While converging, ask the LLM brain (it knows WHICH bright
                 # rectangle is the board); once settled, watch with free local
                 # CV and only call the LLM again when something seems wrong.
                 if not aim_settled and llm_eyes is not None:
-                    bbox = llm_eyes.locate(frame) or detect_target(frame)
+                    bbox = llm_eyes.locate(frame) or detect_fn(frame)
                 else:
-                    bbox = detect_target(frame)
+                    bbox = detect_fn(frame)
                 if bbox is not None:
                     last_bbox = bbox
+                    already_zoomed_out = False  # reacquired — arm the next lost-episode zoom-out
+                    desk_lost_episodes = 0
+                    if is_desk and ptz.supported and now >= desk_pan_tilt_ready_at:
+                        x, y, w, h = bbox
+                        cx = (x + w / 2) / frame.shape[1]
+                        cy = (y + h / 2) / frame.shape[0]
+                        pulsed = False
+                        if abs(cx - 0.5) > DESK_CENTER_DEADBAND:
+                            ptz.nudge_pan(-1 if cx > 0.5 else 1)
+                            pulsed = True
+                        if abs(cy - 0.5) > DESK_CENTER_DEADBAND:
+                            ptz.nudge_tilt(-1 if cy < 0.5 else 1)
+                            pulsed = True
+                        if pulsed:
+                            print("[camera] pan/tilt pulse toward person", flush=True)
+                            desk_pan_tilt_ready_at = now + DESK_PAN_TILT_COOLDOWN_SECONDS
                 command = aimer.observe(bbox, frame.shape[1], frame.shape[0])
                 if command.lost:
                     # CV lost it — give Claude one look before re-scouting
@@ -291,20 +423,40 @@ def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
                     if confirmed is not None:
                         last_bbox = confirmed
                         aim_settled = False  # re-converge on the confirmed spot
+                        already_zoomed_out = False
+                        desk_lost_episodes = 0
                     else:
                         last_bbox = None
-                        if ptz.supported:
+                        # Desk mode tracks a MOVING person — briefly losing them
+                        # (they turned, stepped back, got occluded) is normal and
+                        # shouldn't discard hard-won zoom progress on its own. But
+                        # if they've been gone for several consecutive lost
+                        # episodes (not just one blip), they likely left the
+                        # zoomed-in field of view entirely — zoom out so there's
+                        # a chance of finding them again. Board/slide (a static
+                        # target the CV heuristic genuinely lost) always re-scouts
+                        # immediately.
+                        if is_desk:
+                            desk_lost_episodes += 1
+                        should_zoom_out = not is_desk or desk_lost_episodes >= DESK_LOST_EPISODES_BEFORE_ZOOM_OUT
+                        if ptz.supported and not already_zoomed_out and should_zoom_out:
                             print("[camera] target lost — zooming out to re-scout", flush=True)
                             ptz.zoom_out_full()
+                            already_zoomed_out = True  # don't re-send every poll while still lost
+                            desk_lost_episodes = 0
                         aim_settled = False
                 elif command.moving and ptz.supported:
                     if aim_settled:
                         print("[camera] re-aiming …", flush=True)
                     aim_settled = False
-                    if command.pan:
-                        ptz.nudge_pan(command.pan * PTZ.PAN_STEP)
-                    if command.tilt:
-                        ptz.nudge_tilt(command.tilt * PTZ.TILT_STEP)
+                    # Pan/tilt disabled: on this hardware each pulse is a large,
+                    # roughly fixed-size jump regardless of pulse duration, which
+                    # the AimController's incremental sign/stall learning (tuned
+                    # for smooth, proportional motors) misreads as "wrong
+                    # direction" or "no progress" — freezing the axis within a
+                    # few corrections. Zoom behaves smoothly and is safe to
+                    # drive; digital crop (crop_to_bbox) handles the rest of the
+                    # centering regardless of physical pan/tilt.
                     if command.zoom:
                         ptz.nudge_zoom(command.zoom * PTZ.ZOOM_STEP)
                     # Let the motors move before judging the result or shipping.
@@ -341,15 +493,6 @@ def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
                         print("[camera] frame not ingested — skipped", flush=True)
                 except Exception as error:  # noqa: BLE001 — keep watching on any send failure
                     print(f"[camera] send failed: {error}", flush=True)
-
-            if opts.preview:
-                shown = frame.copy()
-                if aimer is not None and last_bbox:
-                    x, y, w, h = last_bbox
-                    cv2.rectangle(shown, (x, y), (x + w, y + h), (0, 200, 0), 3)
-                cv2.imshow("lecture-camera (q to quit)", cv2.resize(shown, (960, 540)))
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
 
             prev = cur
             time.sleep(opts.poll_seconds)

@@ -78,6 +78,38 @@ def detect_target(frame_bgr: np.ndarray) -> Bbox | None:
     return best
 
 
+_PERSON_CLASS = 0  # COCO class id
+_yolo_model = None  # lazy-loaded singleton — loading YOLO per call would be far too slow
+
+
+def _get_yolo_model():
+    global _yolo_model
+    if _yolo_model is None:
+        from ultralytics import YOLO
+
+        _yolo_model = YOLO("yolov8n.pt")
+    return _yolo_model
+
+
+def detect_person(frame_bgr: np.ndarray) -> Bbox | None:
+    """Locate the largest detected person — the local, cheap detector for
+    ``--modality desk`` (tracks the teacher). Runs YOLOv8n locally; never
+    calls the vision LLM for positioning, only for content description
+    downstream in Knottra. Returns (x, y, w, h) in pixels, or None."""
+    model = _get_yolo_model()
+    results = model.predict(frame_bgr, verbose=False, classes=[_PERSON_CLASS])
+    best: Bbox | None = None
+    best_area = 0.0
+    for result in results:
+        for box in result.boxes:
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            area = (x2 - x1) * (y2 - y1)
+            if area > best_area:
+                best_area = area
+                best = (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+    return best
+
+
 def crop_to_bbox(frame: np.ndarray, bbox: Bbox, margin: float = 0.08) -> np.ndarray:
     """Crop to the bbox plus a relative margin, clamped to the frame."""
     fh, fw = frame.shape[:2]

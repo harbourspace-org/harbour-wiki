@@ -56,6 +56,11 @@ def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
         "digital crop always). Re-scouts if the target is lost.",
     )
     parser.add_argument("--track", action="store_true", help="Auto-pan toward sustained motion (the teacher)")
+    parser.add_argument(
+        "--flip-180",
+        action="store_true",
+        help="Camera is physically mounted upside down — rotate every frame 180 to compensate",
+    )
     parser.add_argument("--preview", action="store_true", help="Show a live window (useful for aiming; q quits)")
     parser.add_argument("--poll", type=float, default=0.5, help="Seconds between frame checks")
     parser.add_argument("--min-send", type=float, default=20.0, help="Minimum seconds between shipped frames")
@@ -91,6 +96,7 @@ def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
         tilt=args.tilt,
         zoom=args.zoom,
         auto_aim=args.auto_aim,
+        flip_180=args.flip_180,
     )
     return cfg, opts, bool(args.test_frame), bool(args.list_devices)
 
@@ -108,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         for index, w, h, ptz in found:
             tag = " (PTZ)" if ptz else ""
-            print(f"  --device {index}  →  {w}x{h}{tag}", flush=True)
+            print(f"  --device {index}  ->  {w}x{h}{tag}", flush=True)
         print("[camera] pick one with --device N; run twice (board + slide) to cover both.", flush=True)
         return 0
 
