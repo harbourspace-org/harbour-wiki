@@ -1,0 +1,28 @@
+{
+  "timezone": "Europe/Madrid",
+  "start_date": "2026-09-07",
+  "weeks": 3,
+  "prewarm_seconds": 60,
+  "prevent_sleep": true,
+  "workdir": "C:\\Harbour Wiki\\capture",
+  "audio": {
+    "device": 1,
+    "model": "small.en"
+  },
+  "camera": {
+    "enabled": true,
+    "device": 0,
+    "modality": "board",
+    "follow_teacher": true,
+    "share_with_zoom": true,
+    "audience_zones": [
+      [[0.0, 0.62], [1.0, 0.62], [1.0, 1.0], [0.0, 1.0]]
+    ]
+  },
+  "lessons": [
+    {"week": 1, "day": "monday", "slot": 1, "course": "Algorithms"},
+    {"week": 1, "day": "wednesday", "slot": 2, "course": "Algorithms"},
+    {"week": 1, "day": "friday", "slot": 3, "course": "Databases"},
+    {"date": "2026-09-14", "slot": 1, "course": "Algorithms"}
+  ]
+}

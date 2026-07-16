@@ -143,6 +143,71 @@ creates the next number. `--new-lecture` forces a fresh one.
 | `--language` | `WHISPER_LANGUAGE` | autodetect | e.g. `en` |
 | `--device` | `AUDIO_DEVICE` | system mic | Index from `python -m sounddevice` |
 
+## Automatic three-week schedule (Windows)
+
+`lecture-scheduler` starts and stops the complete audio + PTZ camera pipeline
+from a JSON timetable. The three fixed slots are:
+
+| Slot | Recording time |
+|---|---|
+| `1` | 09:00–12:30 |
+| `2` | 13:00–16:30 |
+| `3` | 17:00–20:30 |
+
+Copy [schedule.example.json](schedule.example.json) to `schedule.json` and
+replace its lessons with the real timetable. `start_date` is the Monday of
+week 1; a lesson can use either `week` + English/Russian `day`, or an explicit ISO
+`date`:
+
+```json
+{
+  "timezone": "Europe/Madrid",
+  "start_date": "2026-09-07",
+  "weeks": 3,
+  "lessons": [
+    {"week": 1, "day": "monday", "slot": 1, "course": "Algorithms"},
+    {"date": "2026-09-08", "slot": 2, "course": "Databases"}
+  ]
+}
+```
+
+The displayed course title is copied **exactly** from `course`. Lecture titles
+are automatically numbered `1`, `2`, `3`, … independently inside each course.
+An optional `course_id` or `lecture` can override the generated internal id or
+number. Empty timetable cells are simply omitted.
+
+From PowerShell in the `capture` directory:
+
+```powershell
+# Check every expanded date, time, course, and lecture number first.
+uv run lecture-scheduler validate --schedule .\schedule.json
+
+# Install at Windows logon and start the scheduler now.
+uv run lecture-scheduler install --schedule .\schedule.json
+
+uv run lecture-scheduler status --schedule .\schedule.json
+
+# Remove automation later.
+uv run lecture-scheduler uninstall
+```
+
+Re-run `install` after replacing the timetable; it stops the old scheduler and
+loads the new file. The scheduled task runs in the interactive Windows session
+because the camera and OBS Virtual Camera require it. By default the scheduler
+prevents automatic PC sleep, preloads Whisper 60 seconds early without opening
+the microphone, starts recording at the slot boundary, and starts the camera
+only after the audio-created Harbour Wiki session is confirmed. At the end it
+stops the camera, stops audio, drains the durable outbox, and flushes/finalizes
+the lecture.
+
+State survives a scheduler or PC restart in
+`~/.lecture-capture/scheduler-state.json`. Logging is in `scheduler.log`,
+`recorder.log`, and `camera.log` in the same directory. If Windows logs in
+during an active slot, that lesson is resumed; a slot that has already ended is
+marked missed and is never recorded into the next class accidentally. A fully
+powered-off computer cannot wake itself, so it must be on and the classroom
+user must be logged in before the first lesson.
+
 ## Board + slide camera (optional, run alongside the audio)
 
 `lecture-camera` watches a webcam/PTZ camera and ships board or slide text

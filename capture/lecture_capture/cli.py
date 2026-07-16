@@ -12,6 +12,7 @@ import argparse
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -86,6 +87,12 @@ def _build_config(argv: list[str] | None) -> Config:
         default=os.getenv("WHISPER_LANGUAGE") or None,
         help="Force a language code (e.g. en); default = autodetect",
     )
+    parser.add_argument(
+        "--not-before",
+        type=_aware_datetime,
+        default=None,
+        help="Preload Whisper now, but do not open the lecture/microphone before this ISO time",
+    )
     device_env = os.getenv("AUDIO_DEVICE")
     parser.add_argument(
         "--device",
@@ -112,7 +119,18 @@ def _build_config(argv: list[str] | None) -> Config:
         device=args.device,
         context=context,
         min_confidence=args.min_confidence,
+        not_before=args.not_before,
     )
+
+
+def _aware_datetime(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected an ISO-8601 datetime") from error
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError("scheduled datetime must include a timezone")
+    return parsed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -121,6 +139,18 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[capture] loading Whisper model '{cfg.model_size}' (first run downloads it) …", flush=True)
     transcriber = Transcriber(cfg.model_size, cfg.language, context=cfg.context)
+
+    if cfg.not_before is not None:
+        remaining = (cfg.not_before - datetime.now(timezone.utc)).total_seconds()
+        if remaining > 0:
+            print(
+                f"[capture] Whisper ready — scheduled recording starts at "
+                f"{cfg.not_before.isoformat()}",
+                flush=True,
+            )
+        while remaining > 0:
+            time.sleep(min(1.0, remaining))
+            remaining = (cfg.not_before - datetime.now(timezone.utc)).total_seconds()
 
     print(f"[capture] class '{cfg.class_id}' is recording — asking {cfg.base_url} …", flush=True)
     try:

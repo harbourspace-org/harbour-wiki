@@ -10,6 +10,7 @@ falling back to environment (and a local .env); secrets are never hard-coded.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 # faster-whisper expects 16 kHz mono float32 audio.
 SAMPLE_RATE = 16_000
@@ -36,6 +37,9 @@ class Config:
     device: int | None  # mic input-device index; None = system default
     context: str | None = None  # vocabulary hint fed to Whisper (initial_prompt)
     min_confidence: float = 0.35  # utterances below this are NOT sent
+    not_before: datetime | None = (
+        None  # scheduler pre-warms Whisper before this instant
+    )
 
     @property
     def ingest_url(self) -> str:
