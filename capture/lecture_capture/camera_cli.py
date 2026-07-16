@@ -91,6 +91,13 @@ def _build(
         help="Track only the standing lecturer in the board zone; ignore seated foreground students",
     )
     parser.add_argument(
+        "--follow-local",
+        action="store_true",
+        help="Local-only tracking: pan/tilt/zoom toward whoever YOLO detects, no server call, "
+        "no board anchor, no audience-safety filtering. For single-person/office/demo use, "
+        "not classroom lectures — use --follow-teacher there.",
+    )
+    parser.add_argument(
         "--lost-delay",
         type=float,
         default=float(os.getenv("CAMERA_LOST_DELAY_SECONDS", "1.5")),
@@ -204,6 +211,7 @@ def _build(
         auto_aim=args.auto_aim,
         flip_180=args.flip_180,
         follow_teacher=args.follow_teacher or args.track,
+        follow_local=args.follow_local,
         lost_delay_seconds=args.lost_delay,
         share_with_zoom=args.share_with_zoom,
         pan_sign=args.pan_sign,

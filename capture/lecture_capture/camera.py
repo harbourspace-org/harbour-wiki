@@ -57,6 +57,10 @@ class CameraOptions:
     follow_teacher: bool = (
         False  # track the lecturer near the board, never the audience
     )
+    follow_local: bool = (
+        False  # local-only: track whoever YOLO sees, no board anchor, no
+        # server call, no audience-safety filtering (single-person/demo use)
+    )
     lost_delay_seconds: float = 1.5
     share_with_zoom: bool = (
         False  # publish our single physical capture as a virtual camera
@@ -537,11 +541,13 @@ class FrameAnalysisWorker:
         follow_teacher: bool,
         modality: str,
         locate_target=None,
+        follow_local: bool = False,
         audience_zones: tuple[NormalizedPolygon, ...] = DEFAULT_AUDIENCE_ZONES,
     ) -> None:
         from .aiming import LLMAimDetector, TeacherTracker
 
         self._follow_teacher = follow_teacher
+        self._follow_local = follow_local
         self._modality = modality
         self._audience_zones = audience_zones
         self._teacher_tracker = TeacherTracker() if follow_teacher else None
@@ -663,6 +669,16 @@ class FrameAnalysisWorker:
                     if target_bbox is None:
                         target_bbox = semantic_target
                     content_bbox = local_content
+                elif self._follow_local:
+                    # No board anchor, no semantic call: just the most
+                    # confident local YOLO detection. No audience-safety
+                    # filtering — single-person/demo use only.
+                    target_bbox = (
+                        max(detections, key=lambda p: p.confidence).bbox
+                        if detections
+                        else None
+                    )
+                    content_bbox = target_bbox
                 else:
                     target_bbox = semantic_target or local_content
                     content_bbox = (
@@ -1020,6 +1036,12 @@ def run_agent(
     from .aiming import AimController
 
     follow_teacher = opts.follow_teacher or opts.modality == "desk"
+    follow_local = opts.follow_local
+    # Shared "physically chase the target" behavior (pan/tilt pulses, zoom
+    # out + re-scout when lost) — follow_teacher and follow_local differ only
+    # in HOW the target is selected (see FrameAnalysisWorker), not in how the
+    # camera reacts to it once selected.
+    track_physically = follow_teacher or follow_local
     cap = open_camera(opts.device)
     flip_sign = -1 if opts.flip_180 else 1
     ptz = PTZ(
@@ -1037,11 +1059,12 @@ def run_agent(
         # alone. A wide target prevents Zoom viewers and board snapshots from
         # losing the instructional surface while the lecturer walks.
         AimController(fill_target=0.68)
-        if follow_teacher
+        if track_physically
         else (AimController() if opts.auto_aim else None)
     )
     analysis = FrameAnalysisWorker(
         follow_teacher=follow_teacher,
+        follow_local=follow_local,
         modality="board" if opts.modality == "desk" else opts.modality,
         locate_target=locate_target,
         audience_zones=opts.audience_zones,
@@ -1062,11 +1085,11 @@ def run_agent(
     last_analysis_seq = -1
     ignore_analysis_through_seq = -1
     last_analysis_submit_at = float("-inf")
-    analysis_interval = 0.35 if follow_teacher else 0.25
+    analysis_interval = 0.35 if track_physically else 0.25
 
     last_target_bbox = None
     last_content_bbox = None
-    last_seen_at: float | None = time.monotonic() if follow_teacher else None
+    last_seen_at: float | None = time.monotonic() if track_physically else None
     zoomed_out = False
     aim_settled = False
     pan_tilt_ready_at = float("-inf")
@@ -1079,11 +1102,12 @@ def run_agent(
     center_deadband_y = 0.18
     pan_tilt_cooldown_seconds = 0.8
 
-    if follow_teacher and ptz.supported:
+    if track_physically and ptz.supported:
         ptz.zoom_out_full()
         zoomed_out = True
         search_not_before = time.monotonic() + 0.6
-        print("[camera] teacher scout — zoomed out to the full room", flush=True)
+        scout_label = "teacher scout" if follow_teacher else "local scout"
+        print(f"[camera] {scout_label} — zoomed out to the full room", flush=True)
 
     def invalidate_coordinates(current_seq: int) -> None:
         nonlocal ignore_analysis_through_seq, last_target_bbox, last_content_bbox
@@ -1187,7 +1211,7 @@ def run_agent(
                             result.frame.shape[1],
                             result.frame.shape[0],
                         )
-                        if follow_teacher
+                        if track_physically
                         else result.target_bbox
                     )
 
@@ -1207,7 +1231,7 @@ def run_agent(
                     motion_result_fresh = now - result.observed_at <= 1.5
 
                     if (
-                        follow_teacher
+                        track_physically
                         and framing_target is not None
                         and ptz.supported
                         and now >= search_not_before
@@ -1225,8 +1249,9 @@ def run_agent(
                                 ptz.nudge_tilt(1 if cy < 0.5 else -1)
                                 pulsed = True
                         if pulsed:
+                            target_label = "lecturer" if follow_teacher else "target"
                             print(
-                                "[camera] pan/tilt pulse toward lecturer",
+                                f"[camera] pan/tilt pulse toward {target_label}",
                                 flush=True,
                             )
                             pan_tilt_ready_at = now + pan_tilt_cooldown_seconds
@@ -1238,7 +1263,7 @@ def run_agent(
                             aim_settled = False
 
                     if (
-                        not follow_teacher
+                        not track_physically
                         and command is not None
                         and command.zoom
                         and ptz.supported
@@ -1250,14 +1275,15 @@ def run_agent(
                         aim_settled = False
 
                     if (
-                        follow_teacher
+                        track_physically
                         and framing_target is None
                         and last_seen_at is not None
                         and result.observed_at - last_seen_at >= opts.lost_delay_seconds
                         and not zoomed_out
                     ):
+                        lost_label = "teacher/board framing" if follow_teacher else "target"
                         print(
-                            "[camera] teacher/board framing lost — zooming out and re-scouting",
+                            f"[camera] {lost_label} lost — zooming out and re-scouting",
                             flush=True,
                         )
                         if ptz.supported:
@@ -1270,7 +1296,7 @@ def run_agent(
                             aimer.reset()
                         aim_settled = False
                     elif (
-                        not follow_teacher
+                        not track_physically
                         and command is not None
                         and command.lost
                         and not zoomed_out
@@ -1292,13 +1318,14 @@ def run_agent(
                         print("[camera] aim settled — target framed", flush=True)
 
             if (
-                follow_teacher
+                track_physically
                 and zoomed_out
                 and now >= search_not_before
                 and now - last_semantic_request_at >= 3.0
             ):
                 # Keep searching at a low cadence while the room is wide. A
                 # single failed semantic request must not strand the camera.
+                # (No-op for follow_local, which has no semantic detector.)
                 analysis.request_semantic_scout(reset_tracking=False)
                 last_semantic_request_at = now
 
