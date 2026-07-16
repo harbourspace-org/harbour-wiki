@@ -13,6 +13,7 @@ DirectShowCamera below replaces cv2.VideoCapture entirely on the Windows path:
 one graph does capture (via a SampleGrabber, pulled synchronously through
 grab_frame()) AND control (via IAMCameraControl on that same bound filter).
 """
+
 from __future__ import annotations
 
 import threading
@@ -30,6 +31,31 @@ PULSE_SECONDS = 0.04
 ZOOM_MIN, ZOOM_MAX = 100, 1000
 
 
+def _choose_capture_format(formats: list[dict]) -> dict | None:
+    """Choose the format closest to 1080p with a usable live frame rate."""
+    usable = [item for item in formats if item.get("width") and item.get("height")]
+    if not usable:
+        return None
+
+    def score(item: dict) -> tuple[int, int, int, int]:
+        width, height = int(item["width"]), abs(int(item["height"]))
+        # pygrabber 0.2 exposes both interval-derived endpoints; use the
+        # larger achievable rate regardless of their historical field names.
+        fps = max(
+            float(item.get("min_framerate") or 0.0),
+            float(item.get("max_framerate") or 0.0),
+        )
+        exact_1080p = int(width == 1920 and height == 1080)
+        # Prefer at least 15fps, then the resolution nearest 1080p. Do not
+        # blindly choose a 4K mode: YOLO and virtual-camera conversion would
+        # become unnecessarily expensive for no gain in the 1280px upload.
+        live = int(fps >= 15.0)
+        distance = abs(width - 1920) + abs(height - 1080)
+        return live, exact_1080p, -distance, int(min(fps, 30.0))
+
+    return max(usable, key=score)
+
+
 class IAMCameraControl(IUnknown):
     _case_insensitive_ = True
     _iid_ = GUID("{C6E13370-30AC-11d0-A18C-00A0C9118956}")
@@ -37,21 +63,33 @@ class IAMCameraControl(IUnknown):
 
 
 IAMCameraControl._methods_ = [
-    COMMETHOD([], HRESULT, "GetRange",
-              (["in"], c_long, "Property"),
-              (["out"], POINTER(c_long), "pMin"),
-              (["out"], POINTER(c_long), "pMax"),
-              (["out"], POINTER(c_long), "pSteppingDelta"),
-              (["out"], POINTER(c_long), "pDefault"),
-              (["out"], POINTER(c_long), "pCapsFlags")),
-    COMMETHOD([], HRESULT, "Set",
-              (["in"], c_long, "Property"),
-              (["in"], c_long, "lValue"),
-              (["in"], c_long, "Flags")),
-    COMMETHOD([], HRESULT, "Get",
-              (["in"], c_long, "Property"),
-              (["out"], POINTER(c_long), "lValue"),
-              (["out"], POINTER(c_long), "Flags")),
+    COMMETHOD(
+        [],
+        HRESULT,
+        "GetRange",
+        (["in"], c_long, "Property"),
+        (["out"], POINTER(c_long), "pMin"),
+        (["out"], POINTER(c_long), "pMax"),
+        (["out"], POINTER(c_long), "pSteppingDelta"),
+        (["out"], POINTER(c_long), "pDefault"),
+        (["out"], POINTER(c_long), "pCapsFlags"),
+    ),
+    COMMETHOD(
+        [],
+        HRESULT,
+        "Set",
+        (["in"], c_long, "Property"),
+        (["in"], c_long, "lValue"),
+        (["in"], c_long, "Flags"),
+    ),
+    COMMETHOD(
+        [],
+        HRESULT,
+        "Get",
+        (["in"], c_long, "Property"),
+        (["out"], POINTER(c_long), "lValue"),
+        (["out"], POINTER(c_long), "Flags"),
+    ),
 ]
 
 
@@ -76,7 +114,27 @@ class DirectShowCamera:
 
         self._graph = FilterGraph()
         self._graph.add_video_input_device(device_index)
-        raw_cam = self._graph.get_input_device().instance.QueryInterface(IAMCameraControl)
+        input_device = self._graph.get_input_device()
+        try:
+            selected_format = _choose_capture_format(input_device.get_formats())
+            if selected_format is not None:
+                input_device.set_format(int(selected_format["index"]))
+                selected_fps = max(
+                    float(selected_format.get("min_framerate") or 0.0),
+                    float(selected_format.get("max_framerate") or 0.0),
+                )
+                print(
+                    f"[camera] DirectShow format {selected_format['width']}x"
+                    f"{abs(int(selected_format['height']))} @ "
+                    f"{selected_fps:.0f}fps",
+                    flush=True,
+                )
+        except Exception as error:  # noqa: BLE001 — retain driver default on odd UVC firmware
+            print(
+                f"[camera] could not select 1080p format ({error}); using driver default",
+                flush=True,
+            )
+        raw_cam = input_device.instance.QueryInterface(IAMCameraControl)
 
         self._graph.add_sample_grabber(self._on_frame)
         self._graph.add_null_render()

@@ -11,9 +11,12 @@ import numpy as np
 from lecture_capture.aiming import (
     AimController,
     LLMAimDetector,
+    PersonDetection,
+    TeacherTracker,
     crop_to_bbox,
     detect_target,
     encode_aim_shot,
+    select_teacher_candidate,
 )
 
 W, H = 1280, 720
@@ -65,7 +68,9 @@ def test_picks_the_largest_candidate():
 def test_crop_adds_margin_and_clamps_to_frame():
     frame = room_with_board(0, 0, 400, 300)  # bbox at the corner
     out = crop_to_bbox(frame, (0, 0, 400, 300), margin=0.1)
-    assert out.shape[0] == 330 and out.shape[1] == 440  # clamped at 0, extended right/down
+    assert (
+        out.shape[0] == 330 and out.shape[1] == 440
+    )  # clamped at 0, extended right/down
 
 
 def test_crop_center_region():
@@ -78,8 +83,14 @@ def test_crop_center_region():
 # --------------------------------------------------------------------------- #
 # AimController — convergence
 # --------------------------------------------------------------------------- #
-def simulate(controller: AimController, x: float, w: float, steps: int = 60,
-             pan_gain: float = 0.04, zoom_gain: float = 0.05):
+def simulate(
+    controller: AimController,
+    x: float,
+    w: float,
+    steps: int = 60,
+    pan_gain: float = 0.04,
+    zoom_gain: float = 0.05,
+):
     """1-D room simulator: the camera pans (moves bbox opposite to command)
     and zooms (grows bbox width). Returns (x, w, settled_at)."""
     settled_at = None
@@ -122,7 +133,9 @@ def test_dead_motors_freeze_axes_and_settle_never_diverges():
     controller = AimController()
     last = None
     for _ in range(40):
-        last = controller.observe((int(0.1 * W), int(0.1 * H), int(0.2 * W), int(0.2 * H)), W, H)
+        last = controller.observe(
+            (int(0.1 * W), int(0.1 * H), int(0.2 * W), int(0.2 * H)), W, H
+        )
     assert not last.moving  # every axis written off after repeated stalls
 
 
@@ -133,7 +146,9 @@ def test_lost_after_consecutive_misses_and_recovers():
         lost = controller.observe(None, W, H)
     assert lost.lost
     controller.reset()
-    cmd = controller.observe((int(0.4 * W), int(0.35 * H), int(0.25 * W), int(0.25 * H)), W, H)
+    cmd = controller.observe(
+        (int(0.4 * W), int(0.35 * H), int(0.25 * W), int(0.25 * H)), W, H
+    )
     assert not cmd.lost  # re-scouted target picked up again
 
 
@@ -171,6 +186,15 @@ def test_llm_detector_not_found_and_failure_return_none():
     assert LLMAimDetector(boom, "slide").locate(room_with_board(0, 0, 400, 300)) is None
 
 
+def test_llm_teacher_detector_rejects_low_confidence_guess():
+    detector = LLMAimDetector(
+        lambda i, t: {"found": True, "bbox": [0.2, 0.2, 0.2, 0.5], "confidence": 0.4},
+        "teacher",
+        min_confidence=0.65,
+    )
+    assert detector.locate(room_with_board(0, 0, 400, 300)) is None
+
+
 def test_aim_shot_is_downscaled():
     import base64
 
@@ -179,3 +203,51 @@ def test_aim_shot_is_downscaled():
 
     decoded = cv2.imdecode(np.frombuffer(shot, np.uint8), cv2.IMREAD_COLOR)
     assert decoded.shape[1] == 640  # width capped for cheap LLM calls
+
+
+# --------------------------------------------------------------------------- #
+# Teacher selection — never follow seated foreground students
+# --------------------------------------------------------------------------- #
+def test_teacher_selector_rejects_large_foreground_student():
+    board = (180, 80, 850, 390)
+    people = [
+        PersonDetection(
+            (40, 350, 500, 360), 0.97
+        ),  # large seated pupil, back to camera
+        PersonDetection((690, 150, 120, 300), 0.82),  # standing lecturer at the board
+    ]
+    assert select_teacher_candidate(people, W, H, board_bbox=board) == people[1].bbox
+
+
+def test_teacher_selector_fails_closed_when_only_audience_visible():
+    board = (180, 60, 850, 330)
+    people = [
+        PersonDetection((20, 420, 420, 290), 0.98),
+        PersonDetection((700, 430, 360, 280), 0.96),
+    ]
+    assert select_teacher_candidate(people, W, H, board_bbox=board) is None
+
+
+def test_teacher_selector_does_not_guess_without_board_or_semantic_seed():
+    plausible_but_unanchored = [PersonDetection((500, 180, 130, 300), 0.99)]
+    assert select_teacher_candidate(plausible_but_unanchored, W, H) is None
+
+
+def test_teacher_tracker_prefers_temporal_continuity():
+    tracker = TeacherTracker()
+    board = (100, 70, 1000, 430)
+    first = PersonDetection((250, 130, 120, 300), 0.85)
+    assert tracker.select([first], W, H, board) == first.bbox
+
+    same_teacher = PersonDetection((285, 130, 120, 300), 0.75)
+    passer_by = PersonDetection((760, 120, 130, 310), 0.99)
+    assert tracker.select([same_teacher, passer_by], W, H, board) == same_teacher.bbox
+
+
+def test_semantic_seed_overrides_a_wrong_local_board_candidate():
+    tracker = TeacherTracker()
+    semantic_teacher = (850, 130, 120, 300)
+    tracker.seed(semantic_teacher)
+    wrong_bright_rectangle = (80, 80, 380, 260)
+    yolo_match = PersonDetection((860, 135, 120, 300), 0.8)
+    assert tracker.select([yolo_match], W, H, wrong_bright_rectangle) == yolo_match.bbox

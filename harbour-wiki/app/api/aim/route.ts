@@ -11,7 +11,7 @@ import { locateTarget } from "@/lib/aim";
 const MAX_IMAGE_B64 = 2_000_000;
 
 const bodySchema = z.object({
-  target: z.enum(["board", "slide", "desk"]).default("board"),
+  target: z.enum(["board", "slide", "desk", "teacher"]).default("board"),
   image: z.string().min(100).max(MAX_IMAGE_B64), // base64 JPEG (no data: prefix)
 });
 

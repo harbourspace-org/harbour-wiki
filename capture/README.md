@@ -137,8 +137,9 @@ creates the next number. `--new-lecture` forces a fresh one.
 
 `lecture-camera` watches a webcam/PTZ camera and ships board or slide text
 into the SAME live lecture the audio recorder started — Knottra fuses
-speech + board + slide into one record. It only sends a frame once the view
-holds still and has actually changed, so it won't spam mid-write photos.
+speech + board + slide into one record. It sends the sharpest, least-occluded
+board view collected during each 10-second interval. Knottra reads only the
+instructional surface and merges newly visible writing with concurrent speech.
 
 A single camera can't reliably watch the whiteboard **and** the projector at
 once, so run **one process per physical camera** — one aimed at the board,
@@ -152,21 +153,83 @@ uv run lecture-camera --list-devices
 scripts/run-cameras.sh algorithms-2026 0 1     # board=device 0, slide=device 1
 ```
 
-Or run one manually: `uv run lecture-camera --class algorithms-2026 --modality board --device 0`.
+For the PTZ classroom setup (teacher tracking + Zoom sharing), run on Windows:
+
+```powershell
+uv run lecture-camera --class algorithms-2026 --modality board --device 0 `
+  --follow-teacher --share-with-zoom --preview
+```
+
+Or run a fixed board camera manually:
+`uv run lecture-camera --class algorithms-2026 --modality board --device 0`.
 Validate the whole path (camera → gateway → vision LLM → event) without a
 real camera: add `--test-frame`. Aim a PTZ camera interactively with
 `--preview` (shows what it sees; `q` quits).
 
 | Flag | Notes |
 |---|---|
-| `--modality` | `board` \| `slide` \| `desk` — what this camera watches |
+| `--modality` | `board` \| `slide`; legacy `desk` now tracks the teacher but ingests as `board` |
 | `--device` | Index from `--list-devices` |
 | `--auto-aim` | Aim autonomously (see below) |
-| `--track` | Nudge PTZ pan toward sustained motion (the teacher) |
+| `--follow-teacher` | Track the standing lecturer in the board zone; reject the seated foreground |
+| `--track` | Legacy alias for `--follow-teacher` |
+| `--lost-delay` | Delay before a full unzoom and semantic re-scout (default 1.5s) |
+| `--share-with-zoom` | Publish the owned physical feed as an OBS Virtual Camera (Windows) |
+| `--pan-sign` / `--tilt-sign` | Set either to `-1` if that motor moves away from the target |
 | `--pan` / `--tilt` / `--zoom` | Initial PTZ position (UVC cameras only) |
-| `--min-send` | Minimum seconds between shipped frames (default 20) |
+| `--send-interval` | Board capture/enqueue cadence (default 10s; `--min-send` is an alias) |
 | `--test-frame` | Ship one synthetic board image and exit — no camera needed |
 | `--list-devices` | Probe indices 0-9, print which open, then exit |
+
+### Teacher tracking at the board
+
+`--follow-teacher` starts from the widest zoom and asks `/api/aim` to identify
+the standing lecturer in the teaching zone. The semantic prompt explicitly
+rejects seated attendees and foreground backs. Local YOLO then tracks that
+person cheaply between semantic scouts. Candidate selection also requires
+board proximity, rejects large/low foreground detections, and strongly prefers
+the same person over time, so a student crossing the image does not steal the
+camera.
+
+If the lecturer is absent for 1.5 seconds (configurable with `--lost-delay`),
+the camera zooms fully out once, waits briefly for the motor, and performs a
+new semantic scout. Motor directions are calibrated independently with
+`--pan-sign` and `--tilt-sign`; `--flip-180` reverses both automatically.
+
+Tracking and note capture use different regions: PTZ follows the lecturer, but
+the image sent to Knottra is cropped to the writing surface. Within every
+10-second interval the agent retains the sharpest frame with the least teacher
+occlusion. The blue preview rectangle is the board sent to Knottra; green is
+the lecturer being tracked.
+
+Capture is privacy-fail-closed: if no writing-surface bbox is confirmed, no
+room image is uploaded. Detected people intersecting the board crop are heavily
+pixelated/blurred, and foreground attendees are masked before semantic scout
+images reach `/api/aim`. Each selected image retains its actual capture
+timestamp instead of being timestamped later when the HTTP request completes.
+
+### Running alongside Zoom on Windows
+
+Do not let Zoom and `lecture-camera` open the physical Logitech PTZ device
+independently. DirectShow devices and PTZ control are not reliably multi-client.
+Instead use one owner and one virtual output:
+
+1. Install OBS Studio once; its virtual-camera driver is used by `pyvirtualcam`.
+2. Close OBS. Start `lecture-camera` with `--share-with-zoom` first.
+3. In Zoom, select **OBS Virtual Camera**, never the physical Logitech camera.
+4. Zoom may use the same physical microphone as `lecture-capture`; the recorder
+   uses the normal shared PortAudio path. In Windows microphone properties,
+   disable **Allow applications to take exclusive control of this device**.
+
+This gives Zoom the full moving camera image while the capture process retains
+the only DirectShow/PTZ session and independently crops board screenshots for
+Knottra. If Zoom was already using the physical camera, stop its video before
+starting `lecture-camera`, then switch Zoom to the virtual camera.
+
+The DirectShow → virtual-camera loop does not execute YOLO, LLM calls, or HTTP
+requests. Latest-frame analysis and a bounded retrying upload queue run in
+daemon workers, so slow inference or a temporary network outage cannot block
+Zoom video or camera frame acquisition.
 
 ### Autonomous aiming (`--auto-aim`)
 
@@ -178,18 +241,14 @@ With `--auto-aim` the agent frames the board/screen itself — no manual
    is what distinguishes *the whiteboard* from *the projector screen* next to
    it (`--modality board` vs `slide` decides what it looks for). Zoomed-out
    wide shots give it the whole room to choose from.
-2. **Aim** — on a PTZ camera, drives pan/tilt/zoom in a closed feedback loop
-   until the target is centered and fills ~60% of the frame, re-screenshotting
-   and re-asking as it moves. It learns each motor's direction from how the
-   target actually moves (cameras disagree on sign conventions) and freezes
-   any axis that has no effect.
-3. **Lock** — normal stable-and-changed shipping; a free local CV check (the
-   largest bright rectangle) watches for drift every poll, so no LLM calls
-   are burned while nothing changes. Every shipped frame is **digitally
-   cropped to the detected target**, so handwriting arrives at the fusion
-   model at maximum resolution. If the target seems gone, Claude gets one
-   confirming look (glare/people can blind the CV check) before the camera
-   zooms out and re-scouts.
+2. **Aim** — teacher tracking uses calibrated pan/tilt pulses and safe zoom;
+   board/slide targeting uses zoom plus a high-resolution digital crop. Motor
+   signs can be inverted explicitly because UVC cameras disagree on direction.
+3. **Lock** — a free local CV check watches for drift without spending an LLM
+   call on every frame. The best detected writing-surface crop is shipped on
+   the 10-second cadence, so handwriting reaches the fusion model at maximum
+   useful resolution. If the target is gone, the camera zooms out and
+   semantically re-scouts.
 
 The LLM key stays on the server (single-gateway rule) — the lecture PC only
 sends screenshots with its capture token. If `/api/aim` is unreachable the

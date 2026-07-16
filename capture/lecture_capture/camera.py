@@ -1,28 +1,28 @@
 """Camera agent: watch the lecture room, ship NEW board content as an image.
 
-The loop mirrors how a human note-taker photographs a whiteboard:
-wait until the scene is STABLE (the teacher stepped away — nothing moving),
-check the view actually CHANGED since the last shot, then send one frame to
-Harbour.Wiki's /api/vision, which forwards it AS AN IMAGE into the same
-Knottra session the audio feeds — the fusion model reads the photo directly,
-in the same call as whatever speech happens at that moment, rather than this
-agent (or the app) pre-extracting its text.
+The loop mirrors how a human note-taker photographs a whiteboard: during each
+10-second interval retain the sharpest view with the least teacher occlusion,
+then send it to Harbour.Wiki's /api/vision. The app forwards it AS AN IMAGE into
+the same Knottra session the audio feeds, so the fusion model reads the board
+beside whatever speech happened at that moment.
 
-The when-to-shoot decision lives in :class:`SnapshotPolicy` — pure state, no
-I/O — so it is unit-testable without a camera (see tests/test_camera.py).
+Cadence, privacy cropping, frame ranking, analysis, and upload backpressure are
+separate testable components (see tests/test_camera.py).
 
-PTZ: the Logitech PTZ Pro 2 exposes pan/tilt/zoom over UVC; on Windows OpenCV
-reaches them through DirectShow properties. ``--track`` nudges the pan toward
-sustained motion (the teacher) — coarse by design; a static wide shot is the
-reliable default.
+PTZ: the Windows DirectShow session owns the Logitech PTZ Pro 2 once, follows a
+semantically acquired teacher with local YOLO, and can republish that same
+physical stream as a virtual camera for Zoom.
 """
 
 from __future__ import annotations
 
 import base64
 import platform
+import queue
+import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import cv2
 import numpy as np
@@ -48,6 +48,15 @@ class CameraOptions:
     zoom: float | None
     auto_aim: bool = False  # find the board/screen and frame it autonomously
     flip_180: bool = False  # camera physically mounted upside down
+    follow_teacher: bool = (
+        False  # track the lecturer near the board, never the audience
+    )
+    lost_delay_seconds: float = 1.5
+    share_with_zoom: bool = (
+        False  # publish our single physical capture as a virtual camera
+    )
+    pan_sign: int = 1
+    tilt_sign: int = 1
 
 
 # --------------------------------------------------------------------------- #
@@ -99,6 +108,28 @@ class SnapshotPolicy:
         self._last_sent_at = now
 
 
+class PeriodicSnapshotPolicy:
+    """A strict capture/enqueue cadence for the live board stream.
+
+    HTTP retries belong to :class:`SnapshotUploadWorker`; scheduling remains
+    independent of network latency. The old stable/changed policy is retained
+    above for callers that want it, but live capture uses periodic context for
+    every 10-second speech window.
+    """
+
+    def __init__(self, interval_seconds: float = 10.0) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+        self._interval = interval_seconds
+        self._last_sent_at = float("-inf")
+
+    def due(self, now: float) -> bool:
+        return now - self._last_sent_at >= self._interval
+
+    def mark_sent(self, now: float) -> None:
+        self._last_sent_at = now
+
+
 # --------------------------------------------------------------------------- #
 # Image helpers (pure)
 # --------------------------------------------------------------------------- #
@@ -134,6 +165,466 @@ def encode_jpeg_b64(frame: np.ndarray) -> str:
     return base64.b64encode(buf.tobytes()).decode()
 
 
+def _bbox_overlap_fraction(
+    a: tuple[int, int, int, int] | None, b: tuple[int, int, int, int] | None
+) -> float:
+    """Fraction of ``b`` obscured by ``a`` (teacher over writing surface)."""
+    if a is None or b is None:
+        return 0.0
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    x0, y0 = max(ax, bx), max(ay, by)
+    x1, y1 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+    intersection = max(0, x1 - x0) * max(0, y1 - y0)
+    return intersection / max(1, bw * bh)
+
+
+@dataclass(frozen=True)
+class BoardSnapshot:
+    """A privacy-filtered board crop bound to its actual capture time."""
+
+    frame: np.ndarray
+    captured_at: datetime
+    score: float
+
+
+def _board_crop_bounds(
+    frame: np.ndarray,
+    board_bbox: tuple[int, int, int, int],
+    margin: float = 0.05,
+) -> tuple[int, int, int, int] | None:
+    frame_h, frame_w = frame.shape[:2]
+    x, y, w, h = board_bbox
+    if w <= 0 or h <= 0:
+        return None
+    mx, my = int(w * margin), int(h * margin)
+    x0, y0 = max(0, x - mx), max(0, y - my)
+    x1, y1 = min(frame_w, x + w + mx), min(frame_h, y + h + my)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
+
+
+def _anonymize_region(image: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> None:
+    roi = image[y0:y1, x0:x1]
+    if roi.size == 0:
+        return
+    tiny_w = max(1, min(10, roi.shape[1] // 12))
+    tiny_h = max(1, min(10, roi.shape[0] // 12))
+    pixelated = cv2.resize(roi, (tiny_w, tiny_h), interpolation=cv2.INTER_AREA)
+    pixelated = cv2.resize(
+        pixelated, (roi.shape[1], roi.shape[0]), interpolation=cv2.INTER_NEAREST
+    )
+    max_kernel = min(15, roi.shape[0], roi.shape[1])
+    kernel = max_kernel if max_kernel % 2 == 1 else max_kernel - 1
+    if kernel >= 3:
+        pixelated = cv2.GaussianBlur(pixelated, (kernel, kernel), 0)
+    image[y0:y1, x0:x1] = pixelated
+
+
+def privacy_semantic_scout(
+    frame: np.ndarray, people: list[tuple[int, int, int, int]]
+) -> np.ndarray:
+    """Mask seated/foreground people before a room image reaches the aim LLM."""
+    protected = frame.copy()
+    frame_h, frame_w = protected.shape[:2]
+    for x, y, width, height in people:
+        cy = (y + height / 2) / frame_h
+        bottom = (y + height) / frame_h
+        is_foreground = cy > 0.64 or bottom > 0.88 or width / frame_w > 0.48
+        if not is_foreground:
+            continue
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(frame_w, x + width), min(frame_h, y + height)
+        _anonymize_region(protected, x0, y0, x1, y1)
+    return protected
+
+
+def privacy_board_crop(
+    frame: np.ndarray,
+    board_bbox: tuple[int, int, int, int] | None,
+    people: list[tuple[int, int, int, int]],
+) -> np.ndarray | None:
+    """Return only the confirmed board, heavily anonymizing intersecting people.
+
+    Fail closed: without a valid board bbox no pixels leave the lecture PC.
+    Full-room fallback images can contain identifiable students and are never
+    acceptable for the ``board`` stream.
+    """
+    if board_bbox is None:
+        return None
+    bounds = _board_crop_bounds(frame, board_bbox)
+    if bounds is None:
+        return None
+    x0, y0, x1, y1 = bounds
+    cropped = frame[y0:y1, x0:x1].copy()
+
+    for px, py, pw, ph in people:
+        ix0, iy0 = max(x0, px), max(y0, py)
+        ix1, iy1 = min(x1, px + pw), min(y1, py + ph)
+        if ix1 <= ix0 or iy1 <= iy0:
+            continue
+        rx0, ry0 = ix0 - x0, iy0 - y0
+        rx1, ry1 = ix1 - x0, iy1 - y0
+        # Strong pixelation followed by blur removes facial detail while also
+        # honestly marking board pixels that were occluded by that person.
+        _anonymize_region(cropped, rx0, ry0, rx1, ry1)
+    return cropped
+
+
+class BestBoardFrame:
+    """Keep the best recent privacy-filtered board view for one interval."""
+
+    def __init__(self) -> None:
+        self._snapshot: BoardSnapshot | None = None
+
+    def offer(
+        self,
+        frame: np.ndarray,
+        board_bbox: tuple[int, int, int, int] | None,
+        people: list[tuple[int, int, int, int]],
+        captured_at: datetime,
+    ) -> bool:
+        out = privacy_board_crop(frame, board_bbox, people)
+        if out is None:
+            return False
+        gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
+        sharpness = min(2500.0, float(cv2.Laplacian(gray, cv2.CV_64F).var()))
+        occlusion = min(
+            1.0,
+            sum(_bbox_overlap_fraction(person, board_bbox) for person in people),
+        )
+        score = sharpness - 1800.0 * occlusion
+        # A modest recency bias prevents an extremely sharp frame from the
+        # beginning of the interval beating newly written content at the end.
+        if self._snapshot is not None:
+            age = max(0.0, (captured_at - self._snapshot.captured_at).total_seconds())
+            score += min(300.0, age * 30.0)
+        if self._snapshot is None or score > self._snapshot.score:
+            self._snapshot = BoardSnapshot(out, captured_at, score)
+        return True
+
+    def peek(self) -> BoardSnapshot | None:
+        return self._snapshot
+
+    def clear(self) -> None:
+        self._snapshot = None
+
+
+class VirtualCameraOutput:
+    """Publish the already-open physical stream for Zoom to consume.
+
+    The capture process remains the sole owner of the PTZ device; Zoom must use
+    the OBS Virtual Camera exposed here instead of opening the Logitech camera
+    a second time.
+    """
+
+    def __init__(self, width: int, height: int, fps: float) -> None:
+        if platform.system() != "Windows":
+            raise RuntimeError("--share-with-zoom is supported only on Windows")
+        try:
+            import pyvirtualcam
+        except ImportError as error:
+            raise RuntimeError(
+                "pyvirtualcam is missing; run `uv sync` on the Windows lecture PC"
+            ) from error
+        try:
+            self._camera = pyvirtualcam.Camera(
+                width=width,
+                height=height,
+                fps=fps,
+                fmt=pyvirtualcam.PixelFormat.BGR,
+            )
+        except Exception as error:  # noqa: BLE001 — backend supplies platform-specific errors
+            raise RuntimeError(
+                "No virtual-camera backend is available. Install OBS Studio, close OBS, "
+                "then start lecture-camera before Zoom."
+            ) from error
+        print(f"[camera] Zoom feed ready as '{self._camera.device}'", flush=True)
+
+    def send(self, frame: np.ndarray) -> None:
+        self._camera.send(frame)
+
+    def close(self) -> None:
+        self._camera.close()
+
+
+@dataclass(frozen=True)
+class _AnalysisJob:
+    frame_seq: int
+    frame: np.ndarray
+    captured_at: datetime
+    observed_at: float
+    allow_semantic: bool
+
+
+@dataclass(frozen=True)
+class FrameAnalysis:
+    frame_seq: int
+    frame: np.ndarray
+    captured_at: datetime
+    observed_at: float
+    target_bbox: tuple[int, int, int, int] | None
+    content_bbox: tuple[int, int, int, int] | None
+    people: list[tuple[int, int, int, int]]
+    error: str | None = None
+
+
+class FrameAnalysisWorker:
+    """Latest-frame YOLO/LLM worker; never owns the camera or PTZ COM object."""
+
+    def __init__(
+        self, *, follow_teacher: bool, modality: str, locate_target=None
+    ) -> None:
+        from .aiming import LLMAimDetector, TeacherTracker
+
+        self._follow_teacher = follow_teacher
+        self._modality = modality
+        self._teacher_tracker = TeacherTracker() if follow_teacher else None
+        self._target_eyes = (
+            LLMAimDetector(
+                locate_target,
+                "teacher" if follow_teacher else modality,
+                min_confidence=0.65 if follow_teacher else 0.5,
+            )
+            if locate_target is not None
+            else None
+        )
+        self._board_eyes = (
+            LLMAimDetector(locate_target, "board", min_confidence=0.55)
+            if follow_teacher and locate_target is not None
+            else None
+        )
+        self._condition = threading.Condition()
+        self._pending: _AnalysisJob | None = None
+        self._latest: FrameAnalysis | None = None
+        self._semantic_requested = self._target_eyes is not None
+        self._reset_requested = False
+        self._stopping = False
+        self._thread = threading.Thread(
+            target=self._run,
+            name="lecture-camera-analysis",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def submit(
+        self,
+        *,
+        frame_seq: int,
+        frame: np.ndarray,
+        captured_at: datetime,
+        observed_at: float,
+        allow_semantic: bool,
+    ) -> None:
+        # Latest-only queue: inference is allowed to skip obsolete frames, but
+        # physical capture and the Zoom virtual feed never wait for it.
+        job = _AnalysisJob(
+            frame_seq,
+            frame.copy(),
+            captured_at,
+            observed_at,
+            allow_semantic,
+        )
+        with self._condition:
+            self._pending = job
+            self._condition.notify()
+
+    def poll(self, after_frame_seq: int) -> FrameAnalysis | None:
+        with self._condition:
+            if self._latest is None or self._latest.frame_seq <= after_frame_seq:
+                return None
+            return self._latest
+
+    def request_semantic_scout(self, *, reset_tracking: bool = False) -> None:
+        with self._condition:
+            if self._target_eyes is not None:
+                self._semantic_requested = True
+            if reset_tracking:
+                self._reset_requested = True
+            self._condition.notify()
+
+    def close(self) -> None:
+        with self._condition:
+            self._stopping = True
+            self._condition.notify()
+        # LLM requests have their own timeout and this is a daemon thread; do
+        # not freeze shutdown or Zoom teardown waiting for an external service.
+        self._thread.join(timeout=0.5)
+
+    def _run(self) -> None:
+        from .aiming import detect_people, detect_target
+
+        while True:
+            with self._condition:
+                while self._pending is None and not self._stopping:
+                    self._condition.wait(timeout=0.5)
+                if self._stopping:
+                    return
+                job = self._pending
+                self._pending = None
+                reset = self._reset_requested
+                self._reset_requested = False
+                use_semantic = self._semantic_requested and job.allow_semantic
+                if use_semantic:
+                    self._semantic_requested = False
+
+            if reset and self._teacher_tracker is not None:
+                self._teacher_tracker.reset()
+
+            try:
+                local_content = detect_target(job.frame)
+                detections = detect_people(job.frame)
+                people = [person.bbox for person in detections]
+                semantic_target = None
+                if use_semantic:
+                    scout_frame = privacy_semantic_scout(job.frame, people)
+                    if self._board_eyes is not None:
+                        semantic_board = self._board_eyes.locate(scout_frame)
+                        if semantic_board is not None:
+                            local_content = semantic_board
+                    if self._target_eyes is not None:
+                        semantic_target = self._target_eyes.locate(scout_frame)
+                        if self._teacher_tracker is not None:
+                            self._teacher_tracker.seed(semantic_target)
+
+                if self._follow_teacher:
+                    target_bbox = self._teacher_tracker.select(
+                        detections,
+                        job.frame.shape[1],
+                        job.frame.shape[0],
+                        local_content,
+                    )
+                    if target_bbox is None:
+                        target_bbox = semantic_target
+                    content_bbox = local_content
+                else:
+                    target_bbox = semantic_target or local_content
+                    content_bbox = (
+                        target_bbox
+                        if self._modality in {"board", "slide"}
+                        else local_content
+                    )
+
+                result = FrameAnalysis(
+                    job.frame_seq,
+                    job.frame,
+                    job.captured_at,
+                    job.observed_at,
+                    target_bbox,
+                    content_bbox,
+                    people,
+                )
+            except Exception as error:  # noqa: BLE001 — fail closed on any detector failure
+                result = FrameAnalysis(
+                    job.frame_seq,
+                    job.frame,
+                    job.captured_at,
+                    job.observed_at,
+                    None,
+                    None,
+                    [],
+                    error=str(error),
+                )
+
+            with self._condition:
+                if self._latest is None or result.frame_seq > self._latest.frame_seq:
+                    self._latest = result
+
+
+class SnapshotUploadWorker:
+    """Bounded retrying uploader so network latency never pauses the camera."""
+
+    def __init__(self, send_frame, max_pending: int = 3) -> None:
+        self._send_frame = send_frame
+        self._queue: queue.Queue[BoardSnapshot] = queue.Queue(maxsize=max_pending)
+        self._stopping = threading.Event()
+        self._lock = threading.Lock()
+        self._sent = 0
+        self._dropped = 0
+        self._thread = threading.Thread(
+            target=self._run,
+            name="lecture-camera-upload",
+            daemon=True,
+        )
+        self._thread.start()
+
+    @property
+    def sent(self) -> int:
+        with self._lock:
+            return self._sent
+
+    @property
+    def dropped(self) -> int:
+        with self._lock:
+            return self._dropped
+
+    def submit(self, snapshot: BoardSnapshot) -> bool:
+        if self._stopping.is_set():
+            return False
+        try:
+            self._queue.put_nowait(snapshot)
+            return True
+        except queue.Full:
+            # Prefer recent board state over stale backlog after a network
+            # outage. The in-flight upload is untouched; only queued work drops.
+            try:
+                self._queue.get_nowait()
+                self._queue.task_done()
+            except queue.Empty:
+                pass
+            with self._lock:
+                self._dropped += 1
+            self._queue.put_nowait(snapshot)
+            print(
+                "[camera] upload backlog full — dropped oldest pending frame",
+                flush=True,
+            )
+            return True
+
+    def close(self, timeout: float = 5.0) -> None:
+        self._stopping.set()
+        self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        while not self._stopping.is_set() or not self._queue.empty():
+            try:
+                snapshot = self._queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            success = False
+            try:
+                for attempt, delay in enumerate((0.0, 1.0, 2.0), start=1):
+                    if delay and self._stopping.wait(delay):
+                        break
+                    try:
+                        result = self._send_frame(
+                            encode_jpeg_b64(snapshot.frame), snapshot.captured_at
+                        )
+                        if not result.get("ingested"):
+                            raise RuntimeError("server returned ingested=0")
+                        success = True
+                        with self._lock:
+                            self._sent += 1
+                        print(
+                            f"[camera] board frame captured at "
+                            f"{snapshot.captured_at.isoformat()} shipped",
+                            flush=True,
+                        )
+                        break
+                    except Exception as error:  # noqa: BLE001 — bounded retry path
+                        print(
+                            f"[camera] upload attempt {attempt}/3 failed: {error}",
+                            flush=True,
+                        )
+                if not success:
+                    with self._lock:
+                        self._dropped += 1
+                    print("[camera] board frame dropped after retries", flush=True)
+            finally:
+                self._queue.task_done()
+
+
 def make_test_board() -> np.ndarray:
     """Synthetic whiteboard frame — lets --test-frame validate the full path
     (camera PC → gateway → vision LLM → event) without a real board."""
@@ -145,7 +636,16 @@ def make_test_board() -> np.ndarray:
         ("  the board channel works end to end", 290, 1.0, 2),
     ]
     for text, y, scale, thickness in lines:
-        cv2.putText(img, text, (60, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (40, 40, 60), thickness, cv2.LINE_AA)
+        cv2.putText(
+            img,
+            text,
+            (60, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            (40, 40, 60),
+            thickness,
+            cv2.LINE_AA,
+        )
     return img
 
 
@@ -171,9 +671,13 @@ class PTZ:
     TILT_STEP = 1.0
     ZOOM_STEP = 10.0
 
-    def __init__(self, cap, device: int) -> None:
+    def __init__(
+        self, cap, device: int, *, pan_sign: int = 1, tilt_sign: int = 1
+    ) -> None:
         self._cap = cap
         self._cam = getattr(cap, "cam", None)
+        self._pan_sign = 1 if pan_sign >= 0 else -1
+        self._tilt_sign = 1 if tilt_sign >= 0 else -1
         if self._cam is not None:
             self.supported = True
         else:
@@ -191,7 +695,9 @@ class PTZ:
             if zoom is not None:
                 from .winptz import FLAGS_MANUAL, ZOOM, ZOOM_MAX, ZOOM_MIN
 
-                self._cam.Set(ZOOM, max(ZOOM_MIN, min(ZOOM_MAX, int(zoom))), FLAGS_MANUAL)
+                self._cam.Set(
+                    ZOOM, max(ZOOM_MIN, min(ZOOM_MAX, int(zoom))), FLAGS_MANUAL
+                )
             return
         if pan is not None:
             self._cap.set(cv2.CAP_PROP_PAN, pan)
@@ -215,21 +721,22 @@ class PTZ:
             self._cap.set(cv2_prop, current + step)
 
     def nudge_pan(self, step: float) -> None:
-        from .winptz import PAN_RELATIVE
-
-        self._nudge_relative(PAN_RELATIVE, cv2.CAP_PROP_PAN, step)
+        # KSPROPERTY_CAMERACONTROL_PAN_RELATIVE = 10. Keep the numeric id here
+        # so a non-Windows cv2 fallback never imports Windows-only packages.
+        self._nudge_relative(10, cv2.CAP_PROP_PAN, step * self._pan_sign)
 
     def nudge_tilt(self, step: float) -> None:
-        from .winptz import TILT_RELATIVE
-
-        self._nudge_relative(TILT_RELATIVE, cv2.CAP_PROP_TILT, step)
+        # KSPROPERTY_CAMERACONTROL_TILT_RELATIVE = 11.
+        self._nudge_relative(11, cv2.CAP_PROP_TILT, step * self._tilt_sign)
 
     def nudge_zoom(self, step: float) -> None:
         if self._cam is not None:
             from .winptz import FLAGS_MANUAL, ZOOM, ZOOM_MAX, ZOOM_MIN
 
             current, _ = self._cam.Get(ZOOM)
-            self._cam.Set(ZOOM, max(ZOOM_MIN, min(ZOOM_MAX, current + int(step))), FLAGS_MANUAL)
+            self._cam.Set(
+                ZOOM, max(ZOOM_MIN, min(ZOOM_MAX, current + int(step))), FLAGS_MANUAL
+            )
         else:
             current = self._cap.get(cv2.CAP_PROP_ZOOM)
             self._cap.set(cv2.CAP_PROP_ZOOM, max(0.0, current + step))
@@ -259,7 +766,10 @@ def open_camera(device: int):
                 return cam
             cam.release()
         except Exception as error:  # noqa: BLE001 — pygrabber/comtypes missing, etc.
-            print(f"[camera] unified DirectShow capture unavailable ({error}); falling back to cv2", flush=True)
+            print(
+                f"[camera] unified DirectShow capture unavailable ({error}); falling back to cv2",
+                flush=True,
+            )
     return _open_cv2_camera(device)
 
 
@@ -300,204 +810,290 @@ def probe_devices(max_index: int = 10) -> list[tuple[int, int, int, bool]]:
 
 
 def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
-    """Main loop. ``send_frame(b64) -> dict`` ships one frame; returns count sent.
+    """Run capture without letting inference or uploads stall the video feed.
 
-    ``locate_target(image_b64, target) -> dict`` (optional) is the server-side
-    aiming brain: Claude looks at a screenshot and returns the target's bbox.
-    With it, aiming decisions are LLM-driven; local CV remains the fallback
-    and the cheap per-poll drift-watch once the aim has settled.
+    ``send_frame(image_b64, captured_at) -> dict`` runs in a bounded upload
+    worker. The main thread alone owns DirectShow/PTZ and continuously republishes
+    frames to Zoom; YOLO and semantic scouts consume latest-frame copies.
     """
-    from .aiming import AimController, LLMAimDetector, crop_to_bbox, detect_person, detect_target
+    from .aiming import AimController
 
-    is_desk = opts.modality == "desk"
-    detect_fn = detect_person if is_desk else detect_target
-
+    follow_teacher = opts.follow_teacher or opts.modality == "desk"
     cap = open_camera(opts.device)
-    ptz = PTZ(cap, opts.device)
-    if any(v is not None for v in (opts.pan, opts.tilt, opts.zoom)):
+    flip_sign = -1 if opts.flip_180 else 1
+    ptz = PTZ(
+        cap,
+        opts.device,
+        pan_sign=opts.pan_sign * flip_sign,
+        tilt_sign=opts.tilt_sign * flip_sign,
+    )
+    if any(value is not None for value in (opts.pan, opts.tilt, opts.zoom)):
         ptz.apply(opts.pan, opts.tilt, opts.zoom)
         print(f"[camera] PTZ applied (supported={ptz.supported})", flush=True)
 
-    aimer = AimController() if opts.auto_aim else None
-    # Desk mode tracks a MOVING person: the local YOLO detector owns aiming
-    # every poll. The LLM's job is describing content downstream in Knottra,
-    # not positioning — so it's never consulted here for desk.
-    llm_eyes = (
-        LLMAimDetector(locate_target, opts.modality)
-        if (opts.auto_aim and locate_target is not None and not is_desk)
-        else None
+    aimer = (
+        AimController(fill_target=0.32)
+        if follow_teacher
+        else (AimController() if opts.auto_aim else None)
     )
-    if aimer is not None:
-        motors = "PTZ + digital crop" if ptz.supported else "digital crop only (no PTZ motors)"
-        brain = "local YOLO person detector" if is_desk else ("Claude via /api/aim" if llm_eyes else "local CV only")
-        print(f"[camera] auto-aim ON — {motors}; detection: {brain}", flush=True)
-    aim_settled = False
-    already_zoomed_out = False  # avoid re-sending zoom_out_full() every poll while lost
-    desk_lost_episodes = 0  # consecutive "lost" firings with no reacquire — sustained-absence counter
-    DESK_LOST_EPISODES_BEFORE_ZOOM_OUT = 3  # ~3 * _MAX_MISSES(8) polls of nothing, not a brief turn/occlusion
-    # Desk-mode pan/tilt: bang-bang, not the AimController's incremental axis
-    # logic — this hardware's pan/tilt only does large, roughly fixed-size
-    # jumps regardless of pulse duration, which reads as "wrong direction" or
-    # "no progress" to smooth incremental control and freezes the axis within
-    # a few corrections. Instead: one pulse when clearly off-center, then wait
-    # for the motor to settle and the next detection to confirm before
-    # judging again. Direction convention confirmed empirically (keyboard
-    # test): cx > 0.5 (right of center) -> pan +1; cy < 0.5 (above center) ->
-    # tilt +1.
-    DESK_CENTER_DEADBAND = 0.15
-    DESK_PAN_TILT_COOLDOWN_SECONDS = 2.0
-    desk_pan_tilt_ready_at = float("-inf")
-    # YOLO (desk mode) costs ~200-300ms even on a modest CPU — running it every
-    # poll caps the preview at a few FPS. Throttle detection; the preview still
-    # redraws every loop tick regardless. detect_target (board/slide) is cheap
-    # CV, no need to throttle it.
-    DETECT_INTERVAL_SECONDS = 1.0
-    last_detect_at = float("-inf")
+    analysis = FrameAnalysisWorker(
+        follow_teacher=follow_teacher,
+        modality="board" if opts.modality == "desk" else opts.modality,
+        locate_target=locate_target,
+    )
+    uploader = SnapshotUploadWorker(send_frame)
+    policy = PeriodicSnapshotPolicy(interval_seconds=opts.min_send_seconds)
+    best_board_frame = BestBoardFrame()
 
-    policy = SnapshotPolicy(min_send_seconds=opts.min_send_seconds)
-    prev: np.ndarray | None = None
-    off_center_polls = 0
-    sent = 0
-    last_bbox = None
+    virtual_output: VirtualCameraOutput | None = None
+    frame_seq = 0
+    last_analysis_seq = -1
+    ignore_analysis_through_seq = -1
+    last_analysis_submit_at = float("-inf")
+    analysis_interval = 0.35 if follow_teacher else 0.25
+
+    last_target_bbox = None
+    last_content_bbox = None
+    last_seen_at: float | None = None
+    zoomed_out = False
+    aim_settled = False
+    pan_tilt_ready_at = float("-inf")
+    search_not_before = float("-inf")
+    last_analysis_error: str | None = None
+    last_privacy_wait_log_at = float("-inf")
+
+    center_deadband_x = 0.12
+    center_deadband_y = 0.18
+    pan_tilt_cooldown_seconds = 0.8
+
+    if follow_teacher and ptz.supported:
+        ptz.zoom_out_full()
+        zoomed_out = True
+        search_not_before = time.monotonic() + 0.6
+        print("[camera] teacher scout — zoomed out to the full room", flush=True)
+
+    def invalidate_coordinates(current_seq: int) -> None:
+        nonlocal ignore_analysis_through_seq, last_target_bbox, last_content_bbox
+        ignore_analysis_through_seq = max(ignore_analysis_through_seq, current_seq)
+        last_target_bbox = None
+        last_content_bbox = None
 
     try:
         while True:
+            loop_started = time.monotonic()
             ok, frame = cap.read()
-            if not ok:
+            if not ok or frame is None:
                 print("[camera] frame grab failed; retrying …", flush=True)
-                time.sleep(1)
+                time.sleep(0.1)
                 continue
+
+            frame_seq += 1
             if opts.flip_180:
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
-            cur = small_gray(frame)
+            captured_at = datetime.now(timezone.utc)
             now = time.monotonic()
 
-            # Repaint BEFORE the (possibly slow, ~200-300ms) detection call below —
-            # cv2.waitKey() is what pumps the window's message loop on Windows, so
-            # painting only at the end of the iteration left the window looking
-            # blank/black for the duration of every detection call.
+            # This path is intentionally first and contains no inference/network.
+            if opts.share_with_zoom:
+                if virtual_output is None:
+                    height, width = frame.shape[:2]
+                    virtual_fps = max(
+                        10.0, min(30.0, 1.0 / max(0.03, opts.poll_seconds))
+                    )
+                    virtual_output = VirtualCameraOutput(width, height, virtual_fps)
+                virtual_output.send(frame)
+
             if opts.preview:
                 shown = frame.copy()
-                if aimer is not None and last_bbox:
-                    x, y, w, h = last_bbox
-                    cv2.rectangle(shown, (x, y), (x + w, y + h), (0, 200, 0), 3)
-                cv2.imshow("lecture-camera (q to quit)", cv2.resize(shown, (960, 540)))
+                if last_content_bbox:
+                    x, y, width, height = last_content_bbox
+                    cv2.rectangle(
+                        shown,
+                        (x, y),
+                        (x + width, y + height),
+                        (255, 180, 0),
+                        2,
+                    )
+                if last_target_bbox:
+                    x, y, width, height = last_target_bbox
+                    cv2.rectangle(
+                        shown,
+                        (x, y),
+                        (x + width, y + height),
+                        (0, 200, 0),
+                        3,
+                    )
+                cv2.imshow(
+                    "lecture-camera (q to quit)",
+                    cv2.resize(shown, (960, 540)),
+                )
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
-            run_detection = not is_desk or (now - last_detect_at >= DETECT_INTERVAL_SECONDS)
-            if aimer is not None and run_detection:
-                last_detect_at = now
-                # While converging, ask the LLM brain (it knows WHICH bright
-                # rectangle is the board); once settled, watch with free local
-                # CV and only call the LLM again when something seems wrong.
-                if not aim_settled and llm_eyes is not None:
-                    bbox = llm_eyes.locate(frame) or detect_fn(frame)
-                else:
-                    bbox = detect_fn(frame)
-                if bbox is not None:
-                    last_bbox = bbox
-                    already_zoomed_out = False  # reacquired — arm the next lost-episode zoom-out
-                    desk_lost_episodes = 0
-                    if is_desk and ptz.supported and now >= desk_pan_tilt_ready_at:
-                        x, y, w, h = bbox
-                        cx = (x + w / 2) / frame.shape[1]
-                        cy = (y + h / 2) / frame.shape[0]
+            if now - last_analysis_submit_at >= analysis_interval:
+                analysis.submit(
+                    frame_seq=frame_seq,
+                    frame=frame,
+                    captured_at=captured_at,
+                    observed_at=now,
+                    allow_semantic=now >= search_not_before,
+                )
+                last_analysis_submit_at = now
+
+            result = analysis.poll(last_analysis_seq)
+            if result is not None:
+                last_analysis_seq = result.frame_seq
+                if result.error:
+                    if result.error != last_analysis_error:
+                        print(
+                            f"[camera] analysis failed closed: {result.error}",
+                            flush=True,
+                        )
+                        last_analysis_error = result.error
+                elif result.frame_seq > ignore_analysis_through_seq:
+                    last_analysis_error = None
+                    last_target_bbox = result.target_bbox
+                    last_content_bbox = result.content_bbox
+
+                    # This exact analyzed frame, its detections, and timestamp stay
+                    # together. No stale bbox is ever applied to a newer image.
+                    best_board_frame.offer(
+                        result.frame,
+                        result.content_bbox,
+                        result.people,
+                        result.captured_at,
+                    )
+
+                    if result.target_bbox is not None:
+                        last_seen_at = result.observed_at
+                        zoomed_out = False
+
+                    command = (
+                        aimer.observe(
+                            result.target_bbox,
+                            result.frame.shape[1],
+                            result.frame.shape[0],
+                        )
+                        if aimer is not None
+                        else None
+                    )
+                    motion_result_fresh = now - result.observed_at <= 1.5
+
+                    if (
+                        follow_teacher
+                        and result.target_bbox is not None
+                        and ptz.supported
+                        and now >= search_not_before
+                        and motion_result_fresh
+                    ):
+                        x, y, width, height = result.target_bbox
+                        cx = (x + width / 2) / result.frame.shape[1]
+                        cy = (y + height / 2) / result.frame.shape[0]
                         pulsed = False
-                        if abs(cx - 0.5) > DESK_CENTER_DEADBAND:
-                            ptz.nudge_pan(-1 if cx > 0.5 else 1)
-                            pulsed = True
-                        if abs(cy - 0.5) > DESK_CENTER_DEADBAND:
-                            ptz.nudge_tilt(-1 if cy < 0.5 else 1)
-                            pulsed = True
+                        if now >= pan_tilt_ready_at:
+                            if abs(cx - 0.5) > center_deadband_x:
+                                ptz.nudge_pan(1 if cx > 0.5 else -1)
+                                pulsed = True
+                            if abs(cy - 0.5) > center_deadband_y:
+                                ptz.nudge_tilt(1 if cy < 0.5 else -1)
+                                pulsed = True
                         if pulsed:
-                            print("[camera] pan/tilt pulse toward person", flush=True)
-                            desk_pan_tilt_ready_at = now + DESK_PAN_TILT_COOLDOWN_SECONDS
-                command = aimer.observe(bbox, frame.shape[1], frame.shape[0])
-                if command.lost:
-                    # CV lost it — give Claude one look before re-scouting
-                    # (glare or a person in front can blind the CV heuristic
-                    # while the target is still perfectly visible).
-                    confirmed = llm_eyes.locate(frame) if llm_eyes else None
-                    aimer.reset()
-                    if confirmed is not None:
-                        last_bbox = confirmed
-                        aim_settled = False  # re-converge on the confirmed spot
-                        already_zoomed_out = False
-                        desk_lost_episodes = 0
-                    else:
-                        last_bbox = None
-                        # Desk mode tracks a MOVING person — briefly losing them
-                        # (they turned, stepped back, got occluded) is normal and
-                        # shouldn't discard hard-won zoom progress on its own. But
-                        # if they've been gone for several consecutive lost
-                        # episodes (not just one blip), they likely left the
-                        # zoomed-in field of view entirely — zoom out so there's
-                        # a chance of finding them again. Board/slide (a static
-                        # target the CV heuristic genuinely lost) always re-scouts
-                        # immediately.
-                        if is_desk:
-                            desk_lost_episodes += 1
-                        should_zoom_out = not is_desk or desk_lost_episodes >= DESK_LOST_EPISODES_BEFORE_ZOOM_OUT
-                        if ptz.supported and not already_zoomed_out and should_zoom_out:
-                            print("[camera] target lost — zooming out to re-scout", flush=True)
-                            ptz.zoom_out_full()
-                            already_zoomed_out = True  # don't re-send every poll while still lost
-                            desk_lost_episodes = 0
-                        aim_settled = False
-                elif command.moving and ptz.supported:
-                    if aim_settled:
-                        print("[camera] re-aiming …", flush=True)
-                    aim_settled = False
-                    # Pan/tilt disabled: on this hardware each pulse is a large,
-                    # roughly fixed-size jump regardless of pulse duration, which
-                    # the AimController's incremental sign/stall learning (tuned
-                    # for smooth, proportional motors) misreads as "wrong
-                    # direction" or "no progress" — freezing the axis within a
-                    # few corrections. Zoom behaves smoothly and is safe to
-                    # drive; digital crop (crop_to_bbox) handles the rest of the
-                    # centering regardless of physical pan/tilt.
-                    if command.zoom:
+                            print(
+                                "[camera] pan/tilt pulse toward lecturer",
+                                flush=True,
+                            )
+                            pan_tilt_ready_at = now + pan_tilt_cooldown_seconds
+                            invalidate_coordinates(frame_seq)
+                            aim_settled = False
+                        elif command is not None and command.zoom:
+                            ptz.nudge_zoom(command.zoom * PTZ.ZOOM_STEP)
+                            invalidate_coordinates(frame_seq)
+                            aim_settled = False
+
+                    if (
+                        not follow_teacher
+                        and command is not None
+                        and command.zoom
+                        and ptz.supported
+                        and now >= search_not_before
+                        and motion_result_fresh
+                    ):
                         ptz.nudge_zoom(command.zoom * PTZ.ZOOM_STEP)
-                    # Let the motors move before judging the result or shipping.
-                    prev = cur
-                    time.sleep(max(opts.poll_seconds, 0.4))
-                    continue
-                elif command.settled and not aim_settled:
-                    aim_settled = True
-                    print("[camera] aim settled — target framed", flush=True)
+                        invalidate_coordinates(frame_seq)
+                        aim_settled = False
 
-            # --track: pan toward sustained off-center motion (the teacher).
-            # Skipped under auto-aim (the aimer owns the motors).
-            if opts.track and aimer is None and ptz.supported and prev is not None:
-                cx = motion_centroid_x(prev, cur)
-                if cx is not None and abs(cx - 0.5) > 0.25:
-                    off_center_polls += 1
-                    if off_center_polls >= 6:  # ~3s of sustained offset
-                        ptz.nudge_pan(1.0 if cx > 0.5 else -1.0)
-                        off_center_polls = 0
-                else:
-                    off_center_polls = 0
+                    if (
+                        follow_teacher
+                        and result.target_bbox is None
+                        and last_seen_at is not None
+                        and result.observed_at - last_seen_at >= opts.lost_delay_seconds
+                        and not zoomed_out
+                    ):
+                        print(
+                            "[camera] lecturer lost — zooming out and re-scouting",
+                            flush=True,
+                        )
+                        if ptz.supported:
+                            ptz.zoom_out_full()
+                        zoomed_out = True
+                        search_not_before = now + 0.6
+                        invalidate_coordinates(frame_seq)
+                        analysis.request_semantic_scout(reset_tracking=True)
+                        if aimer is not None:
+                            aimer.reset()
+                        aim_settled = False
+                    elif (
+                        not follow_teacher
+                        and command is not None
+                        and command.lost
+                        and not zoomed_out
+                    ):
+                        print(
+                            "[camera] content target lost — zooming out and re-scouting",
+                            flush=True,
+                        )
+                        if ptz.supported:
+                            ptz.zoom_out_full()
+                        zoomed_out = True
+                        search_not_before = now + 0.6
+                        invalidate_coordinates(frame_seq)
+                        analysis.request_semantic_scout()
+                        aimer.reset()
+                        aim_settled = False
+                    elif command is not None and command.settled and not aim_settled:
+                        aim_settled = True
+                        print("[camera] aim settled — target framed", flush=True)
 
-            if policy.observe(cur, now):
-                # Digital framing: ship the detected target region, not the
-                # whole room — this is what makes handwriting legible.
-                out = crop_to_bbox(frame, last_bbox) if (aimer is not None and last_bbox) else frame
-                try:
-                    result = send_frame(encode_jpeg_b64(out))
-                    policy.mark_sent(cur, now)
-                    if result.get("ingested"):
-                        sent += 1
-                        print(f"[{sent:>3}] {opts.modality} frame shipped", flush=True)
-                    else:
-                        print("[camera] frame not ingested — skipped", flush=True)
-                except Exception as error:  # noqa: BLE001 — keep watching on any send failure
-                    print(f"[camera] send failed: {error}", flush=True)
+            if policy.due(now):
+                snapshot = best_board_frame.peek()
+                if snapshot is None:
+                    if now - last_privacy_wait_log_at >= 5.0:
+                        print(
+                            "[camera] screenshot due, but no privacy-safe board "
+                            "crop is confirmed — not uploading the room",
+                            flush=True,
+                        )
+                        last_privacy_wait_log_at = now
+                elif uploader.submit(snapshot):
+                    # Cadence is based on capture scheduling, not HTTP latency.
+                    policy.mark_sent(now)
+                    best_board_frame.clear()
 
-            prev = cur
-            time.sleep(opts.poll_seconds)
+            elapsed = time.monotonic() - loop_started
+            time.sleep(max(0.0, opts.poll_seconds - elapsed))
     finally:
+        analysis.close()
+        if virtual_output is not None:
+            virtual_output.close()
         cap.release()
         if opts.preview:
             cv2.destroyAllWindows()
-    return sent
+        uploader.close()
+
+    if uploader.dropped:
+        print(
+            f"[camera] upload summary: {uploader.sent} sent, "
+            f"{uploader.dropped} dropped",
+            flush=True,
+        )
+    return uploader.sent

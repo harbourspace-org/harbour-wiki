@@ -91,8 +91,11 @@ class Gateway:
         )
 
     def send_frame(self, image_b64: str, modality: str, when: datetime) -> dict:
-        """Ship a camera frame to /api/vision; the server extracts its text and
-        ingests it into this session. Returns the server's summary."""
+        """Ship a frame to /api/vision for multimodal fusion in Knottra.
+
+        The gateway keeps the image intact; Knottra reads the instructional
+        surface alongside speech from the same temporal window.
+        """
         if self._session is None:
             raise RuntimeError("Gateway.start() must succeed before sending frames")
         response = requests.post(

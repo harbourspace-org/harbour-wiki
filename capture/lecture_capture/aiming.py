@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from base64 import b64encode
 from dataclasses import dataclass, field
+from math import hypot
 
 import cv2
 import numpy as np
@@ -79,7 +80,9 @@ def detect_target(frame_bgr: np.ndarray) -> Bbox | None:
 
 
 _PERSON_CLASS = 0  # COCO class id
-_yolo_model = None  # lazy-loaded singleton — loading YOLO per call would be far too slow
+_yolo_model = (
+    None  # lazy-loaded singleton — loading YOLO per call would be far too slow
+)
 
 
 def _get_yolo_model():
@@ -91,23 +94,193 @@ def _get_yolo_model():
     return _yolo_model
 
 
-def detect_person(frame_bgr: np.ndarray) -> Bbox | None:
-    """Locate the largest detected person — the local, cheap detector for
-    ``--modality desk`` (tracks the teacher). Runs YOLOv8n locally; never
-    calls the vision LLM for positioning, only for content description
-    downstream in Knottra. Returns (x, y, w, h) in pixels, or None."""
+@dataclass(frozen=True)
+class PersonDetection:
+    bbox: Bbox
+    confidence: float
+
+
+def detect_people(
+    frame_bgr: np.ndarray, min_confidence: float = 0.35
+) -> list[PersonDetection]:
+    """Return every credible person detection, not merely the largest one.
+
+    The largest person in a lecture-room image is commonly a seated student in
+    the foreground. Teacher selection therefore belongs to :class:`TeacherTracker`,
+    where board proximity, foreground rejection, and temporal continuity can be
+    considered together.
+    """
     model = _get_yolo_model()
-    results = model.predict(frame_bgr, verbose=False, classes=[_PERSON_CLASS])
-    best: Bbox | None = None
-    best_area = 0.0
+    results = model.predict(
+        frame_bgr,
+        verbose=False,
+        classes=[_PERSON_CLASS],
+        conf=min_confidence,
+    )
+    people: list[PersonDetection] = []
     for result in results:
         for box in result.boxes:
             x1, y1, x2, y2 = box.xyxy[0].tolist()
-            area = (x2 - x1) * (y2 - y1)
-            if area > best_area:
-                best_area = area
-                best = (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+            confidence = float(box.conf[0]) if box.conf is not None else 0.0
+            people.append(
+                PersonDetection(
+                    bbox=(int(x1), int(y1), int(x2 - x1), int(y2 - y1)),
+                    confidence=confidence,
+                )
+            )
+    return people
+
+
+def _intersection_fraction(inner: Bbox, outer: Bbox) -> float:
+    """Fraction of ``inner`` covered by ``outer``."""
+    ix, iy, iw, ih = inner
+    ox, oy, ow, oh = outer
+    x0, y0 = max(ix, ox), max(iy, oy)
+    x1, y1 = min(ix + iw, ox + ow), min(iy + ih, oy + oh)
+    intersection = max(0, x1 - x0) * max(0, y1 - y0)
+    return intersection / max(1, iw * ih)
+
+
+def _iou(a: Bbox, b: Bbox) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    x0, y0 = max(ax, bx), max(ay, by)
+    x1, y1 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+    intersection = max(0, x1 - x0) * max(0, y1 - y0)
+    union = aw * ah + bw * bh - intersection
+    return intersection / max(1, union)
+
+
+def _teacher_zone(board: Bbox, frame_w: int, frame_h: int) -> Bbox:
+    """Expand the writing surface into the area where its teacher may stand."""
+    x, y, w, h = board
+    # A teacher often stands immediately beside or just below the board. The
+    # asymmetric vertical expansion deliberately stops before the desk rows.
+    x0 = max(0, int(x - 0.25 * w))
+    y0 = max(0, int(y - 0.15 * h))
+    x1 = min(frame_w, int(x + 1.25 * w))
+    y1 = min(frame_h, int(y + 1.45 * h))
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def select_teacher_candidate(
+    people: list[PersonDetection],
+    frame_w: int,
+    frame_h: int,
+    *,
+    board_bbox: Bbox | None = None,
+    previous_bbox: Bbox | None = None,
+) -> Bbox | None:
+    """Pick the standing teacher near the board and reject foreground pupils.
+
+    This intentionally uses geometry rather than face identity. A lecturer can
+    face the board for long stretches, whereas seated pupils are distinguished
+    reliably by being large, low in the image, and outside the board zone.
+    Temporal continuity prevents jumps to a different person when somebody
+    briefly walks through the frame.
+    """
+    # With neither a board anchor nor a semantic/temporal teacher seed there is
+    # no defensible way to distinguish a mid-row attendee from the lecturer.
+    # Do not move the camera on a guess.
+    if board_bbox is None and previous_bbox is None:
+        return None
+
+    board_zone = _teacher_zone(board_bbox, frame_w, frame_h) if board_bbox else None
+    best: Bbox | None = None
+    best_score = float("-inf")
+    for person in people:
+        x, y, w, h = person.bbox
+        if w <= 0 or h <= 0:
+            continue
+        cx = (x + w / 2) / frame_w
+        cy = (y + h / 2) / frame_h
+        bottom = (y + h) / frame_h
+        width = w / frame_w
+        height = h / frame_h
+
+        # Students closest to the camera dominate the bottom of the image.
+        # Fail closed: it is better to pause/re-scout than swing toward them.
+        seated_lower_row = cy > 0.64 and bottom > 0.82
+        foreground = (
+            cy > 0.74
+            or width > 0.48
+            or seated_lower_row
+            or (bottom > 0.96 and height > 0.34)
+        )
+        if foreground:
+            continue
+
+        continuity_iou = (
+            _iou(person.bbox, previous_bbox) if previous_bbox is not None else 0.0
+        )
+        if previous_bbox is not None:
+            px, py, pw, ph = previous_bbox
+            pcx, pcy = (px + pw / 2) / frame_w, (py + ph / 2) / frame_h
+            distance = hypot(cx - pcx, cy - pcy)
+        else:
+            distance = float("inf")
+
+        zone_overlap = (
+            _intersection_fraction(person.bbox, board_zone) if board_zone else 0.0
+        )
+        semantic_continuity = continuity_iou >= 0.10 or distance <= 0.12
+        if board_zone is not None and zone_overlap < 0.12 and not semantic_continuity:
+            continue
+
+        # Standing people are normally taller than wide; confidence and an
+        # upper-room position are weak tie-breakers, never the main identity.
+        standing = min(1.0, h / max(1.0, 1.35 * w))
+        score = (
+            2.5 * zone_overlap + 1.2 * standing + person.confidence + 0.5 * (1.0 - cy)
+        )
+
+        if previous_bbox is not None:
+            score += 4.0 * continuity_iou
+            score += 2.0 * max(0.0, 1.0 - distance / 0.35)
+
+        if score > best_score:
+            best, best_score = person.bbox, score
     return best
+
+
+@dataclass
+class TeacherTracker:
+    """Stateful association around the pure teacher-candidate selector."""
+
+    bbox: Bbox | None = None
+
+    def seed(self, bbox: Bbox | None) -> None:
+        if bbox is not None:
+            self.bbox = bbox
+
+    def select(
+        self,
+        people: list[PersonDetection],
+        frame_w: int,
+        frame_h: int,
+        board_bbox: Bbox | None,
+    ) -> Bbox | None:
+        selected = select_teacher_candidate(
+            people,
+            frame_w,
+            frame_h,
+            board_bbox=board_bbox,
+            previous_bbox=self.bbox,
+        )
+        if selected is not None:
+            self.bbox = selected
+        return selected
+
+    def reset(self) -> None:
+        self.bbox = None
+
+
+def detect_person(frame_bgr: np.ndarray) -> Bbox | None:
+    """Backward-compatible one-shot selection with foreground rejection."""
+    h, w = frame_bgr.shape[:2]
+    return select_teacher_candidate(
+        detect_people(frame_bgr), w, h, board_bbox=detect_target(frame_bgr)
+    )
 
 
 def crop_to_bbox(frame: np.ndarray, bbox: Bbox, margin: float = 0.08) -> np.ndarray:
@@ -145,9 +318,10 @@ class LLMAimDetector:
     the caller falls back to classical CV rather than crashing the recorder.
     """
 
-    def __init__(self, locate_target, target: str) -> None:
+    def __init__(self, locate_target, target: str, min_confidence: float = 0.5) -> None:
         self._locate = locate_target
         self._target = target
+        self._min_confidence = min_confidence
 
     def locate(self, frame: np.ndarray) -> Bbox | None:
         try:
@@ -155,7 +329,11 @@ class LLMAimDetector:
         except Exception as error:  # noqa: BLE001 — aiming must never kill capture
             print(f"[camera] aim query failed: {error}", flush=True)
             return None
-        if not result.get("found") or not result.get("bbox"):
+        if (
+            not result.get("found")
+            or not result.get("bbox")
+            or float(result.get("confidence", 0.0)) < self._min_confidence
+        ):
             return None
         fh, fw = frame.shape[:2]
         nx, ny, nw, nh = (float(v) for v in result["bbox"])
