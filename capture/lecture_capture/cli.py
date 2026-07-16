@@ -12,7 +12,6 @@ import argparse
 import os
 import sys
 import time
-from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -157,9 +156,12 @@ def main(argv: list[str] | None = None) -> int:
     VOCAB_REFRESH_SECONDS = 300  # today's own concepts join the bias as fusion runs
     last_vocab_refresh = time.monotonic()
     try:
-        with MicStream(cfg.chunk_seconds, cfg.device) as mic:
-            for audio in mic.chunks():
-                spoken_at = datetime.now(timezone.utc)
+        with MicStream(
+            cfg.chunk_seconds,
+            cfg.device,
+            spool_key=started.session,
+        ) as mic:
+            for utterance in mic.chunks():
                 if time.monotonic() - last_vocab_refresh > VOCAB_REFRESH_SECONDS:
                     last_vocab_refresh = time.monotonic()
                     try:
@@ -169,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
                             transcriber.set_context(build_context(cfg.context, refreshed.vocabulary))
                     except requests.RequestException:
                         pass  # keep recording; retry at the next interval
-                transcript = transcriber.transcribe(audio)
+                transcript = transcriber.transcribe(utterance.samples)
                 if not transcript.text:
                     continue
                 if transcript.confidence < cfg.min_confidence:
@@ -179,7 +181,11 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     continue
                 try:
-                    gateway.send_speech(transcript.text, transcript.confidence, spoken_at)
+                    gateway.send_speech(
+                        transcript.text,
+                        transcript.confidence,
+                        utterance.started_at,
+                    )
                     events += 1
                     print(f"[{events:>3}] ({transcript.confidence:.2f}) {transcript.text}", flush=True)
                 except requests.RequestException as error:

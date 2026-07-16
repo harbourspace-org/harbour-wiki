@@ -90,7 +90,9 @@ def _get_yolo_model():
     if _yolo_model is None:
         from ultralytics import YOLO
 
-        _yolo_model = YOLO("yolov8n.pt")
+        # Segmentation masks let the privacy path remove a person's silhouette
+        # without destroying a large rectangular patch of useful board text.
+        _yolo_model = YOLO("yolov8n-seg.pt")
     return _yolo_model
 
 
@@ -98,10 +100,11 @@ def _get_yolo_model():
 class PersonDetection:
     bbox: Bbox
     confidence: float
+    mask: np.ndarray | None = field(default=None, compare=False, repr=False)
 
 
 def detect_people(
-    frame_bgr: np.ndarray, min_confidence: float = 0.35
+    frame_bgr: np.ndarray, min_confidence: float = 0.20
 ) -> list[PersonDetection]:
     """Return every credible person detection, not merely the largest one.
 
@@ -118,14 +121,25 @@ def detect_people(
         conf=min_confidence,
     )
     people: list[PersonDetection] = []
+    frame_h, frame_w = frame_bgr.shape[:2]
     for result in results:
-        for box in result.boxes:
+        masks = result.masks.data if result.masks is not None else None
+        for index, box in enumerate(result.boxes):
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             confidence = float(box.conf[0]) if box.conf is not None else 0.0
+            mask = None
+            if masks is not None and index < len(masks):
+                raw_mask = masks[index].detach().cpu().numpy().astype(np.uint8)
+                mask = cv2.resize(
+                    raw_mask,
+                    (frame_w, frame_h),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
             people.append(
                 PersonDetection(
                     bbox=(int(x1), int(y1), int(x2 - x1), int(y2 - y1)),
                     confidence=confidence,
+                    mask=mask,
                 )
             )
     return people

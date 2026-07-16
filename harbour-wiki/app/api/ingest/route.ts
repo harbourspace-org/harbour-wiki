@@ -21,6 +21,7 @@ import {
 import { DEFAULT_DOMAIN_PROMPT } from "@/lib/domainPrompt";
 
 const eventSchema = z.object({
+  client_event_id: z.string().min(8).max(128).optional(),
   timestamp: z.string().min(1),
   modality: z.string().min(1).max(64),
   content: z.string().min(1).max(32_000),

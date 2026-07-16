@@ -1,8 +1,10 @@
-"""Unit tests for the utterance chunker (pure state, synthetic blocks)."""
+"""Unit tests for timestamped, bounded microphone capture."""
+
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
-from lecture_capture.audio import UtteranceChunker
+from lecture_capture.audio import MicStream, UtteranceChunker
 
 RATE = 16_000
 BLOCK = RATE // 10  # 100ms blocks
@@ -42,7 +44,9 @@ class TestUtteranceChunker:
 
     def test_forced_cut_on_endless_speech(self):
         chunker = UtteranceChunker(
-            min_speech_seconds=1.0, trailing_silence_seconds=0.5, max_utterance_seconds=4.0
+            min_speech_seconds=1.0,
+            trailing_silence_seconds=0.5,
+            max_utterance_seconds=4.0,
         )
         outputs = feed_many(chunker, [speech_block()] * 100)  # 10s of nonstop talk
         assert len(outputs) >= 2  # cut every ~4s
@@ -56,3 +60,42 @@ class TestUtteranceChunker:
         # 0.5s cough then silence: below min speech → nothing emitted.
         outputs = feed_many(chunker, [speech_block()] * 5 + [silence_block()] * 20)
         assert outputs == []
+
+    def test_timed_chunk_keeps_first_speech_timestamp(self):
+        chunker = UtteranceChunker(
+            min_speech_seconds=0.2,
+            trailing_silence_seconds=0.2,
+        )
+        base = datetime(2026, 7, 16, 10, 0, tzinfo=timezone.utc)
+        output = None
+        blocks = [silence_block()] + [speech_block()] * 3 + [silence_block()] * 3
+        for index, block in enumerate(blocks):
+            started = base + timedelta(seconds=index / 10)
+            output = chunker.feed_timed(
+                block, started, started + timedelta(seconds=0.1)
+            )
+            if output is not None:
+                break
+        assert output is not None
+        assert output.started_at == base + timedelta(seconds=0.1)
+        assert output.ended_at > output.started_at
+
+
+def test_mic_queue_spools_overflow_to_wav_in_capture_order(tmp_path):
+    mic = MicStream(
+        max_utterance_seconds=4.0,
+        memory_seconds=0.1,
+        spool_directory=tmp_path,
+    )
+    samples_1 = np.full((BLOCK, 1), 0.1, np.float32)
+    samples_2 = np.full((BLOCK, 1), 0.2, np.float32)
+    mic._callback(samples_1, BLOCK, None, None)
+    mic._callback(samples_2, BLOCK, None, None)
+
+    assert mic._q.qsize() == 1
+    assert len(list(tmp_path.glob("block_*.wav"))) == 1
+    first = mic._next_block()
+    second = mic._next_block()
+    assert np.isclose(first.samples.mean(), 0.1)
+    assert np.isclose(second.samples.mean(), 0.2, atol=1e-3)
+    assert first.started_at <= second.started_at

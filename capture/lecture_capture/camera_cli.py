@@ -14,12 +14,29 @@ from datetime import datetime, timezone
 import requests
 from dotenv import load_dotenv
 
-from .camera import CameraOptions, run_agent
+from .camera import DEFAULT_AUDIENCE_ZONES, CameraOptions, NormalizedPolygon, run_agent
 from .config import Config, DEFAULT_CHUNK_SECONDS
 from .gateway import Gateway
 
 
-def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
+def _parse_zone(value: str) -> NormalizedPolygon:
+    try:
+        points = tuple(
+            (float(pair.split(",", 1)[0]), float(pair.split(",", 1)[1]))
+            for pair in value.split(";")
+        )
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "zone must look like 0,0.62;1,0.62;1,1;0,1"
+        ) from error
+    if len(points) < 3 or any(not (0 <= x <= 1 and 0 <= y <= 1) for x, y in points):
+        raise argparse.ArgumentTypeError("zone needs >=3 normalized points in 0..1")
+    return points
+
+
+def _build(
+    argv: list[str] | None,
+) -> tuple[Config, CameraOptions, bool, bool]:
     load_dotenv()
     parser = argparse.ArgumentParser(
         prog="lecture-camera",
@@ -85,6 +102,20 @@ def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
         help="Publish this single physical capture as an OBS Virtual Camera for Zoom (Windows only)",
     )
     parser.add_argument(
+        "--audience-zone",
+        action="append",
+        type=_parse_zone,
+        default=None,
+        metavar="X,Y;X,Y;...",
+        help="Normalized polygon that is always masked (repeatable). Default: lower 38%% of frame",
+    )
+    parser.add_argument(
+        "--privacy-min-confidence",
+        type=float,
+        default=float(os.getenv("CAMERA_PRIVACY_MIN_CONFIDENCE", "0.35")),
+        help="Fail closed when a weaker person detection overlaps the board (default: 0.35)",
+    )
+    parser.add_argument(
         "--pan-sign",
         type=int,
         choices=[-1, 1],
@@ -136,6 +167,17 @@ def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
         parser.error("--send-interval must be positive")
     if args.lost_delay <= 0:
         parser.error("--lost-delay must be positive")
+    if not 0 <= args.privacy_min_confidence <= 1:
+        parser.error("--privacy-min-confidence must be between 0 and 1")
+
+    env_zones = os.getenv("CAMERA_AUDIENCE_ZONES")
+    audience_zones = (
+        tuple(args.audience_zone)
+        if args.audience_zone
+        else tuple(_parse_zone(zone) for zone in env_zones.split("|") if zone.strip())
+        if env_zones
+        else DEFAULT_AUDIENCE_ZONES
+    )
 
     cfg = Config(
         base_url=args.base_url.rstrip("/"),
@@ -166,6 +208,8 @@ def _build(argv: list[str] | None) -> tuple[Config, CameraOptions]:
         share_with_zoom=args.share_with_zoom,
         pan_sign=args.pan_sign,
         tilt_sign=args.tilt_sign,
+        audience_zones=audience_zones,
+        privacy_min_person_confidence=args.privacy_min_confidence,
     )
     return cfg, opts, bool(args.test_frame), bool(args.list_devices)
 
@@ -241,6 +285,9 @@ def main(argv: list[str] | None = None) -> int:
     def send(image_b64: str, captured_at: datetime) -> dict:
         return gateway.send_frame(image_b64, stream_modality, captured_at)
 
+    def persist(image_b64: str, captured_at: datetime) -> str:
+        return gateway.queue_frame(image_b64, stream_modality, captured_at)
+
     try:
         sent = run_agent(
             opts,
@@ -248,6 +295,8 @@ def main(argv: list[str] | None = None) -> int:
             locate_target=gateway.locate_target
             if (opts.auto_aim or opts.follow_teacher)
             else None,
+            persist_frame=persist,
+            drain_pending=gateway.drain_outbox,
         )
         print(f"[camera] done — {sent} frames shipped.", flush=True)
     except KeyboardInterrupt:

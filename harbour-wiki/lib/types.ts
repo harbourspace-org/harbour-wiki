@@ -38,6 +38,8 @@ export type SearchHit = { concept: ConceptNode; score: number };
 export type SearchOut = { session_id: string; query: string; hits: SearchHit[] };
 
 export type EventIn = {
+  /** Stable capture-side id used to deduplicate at-least-once delivery. */
+  client_event_id?: string;
   timestamp: string;
   modality: string;
   content: string;

@@ -90,6 +90,16 @@ recorder's own flush path and sends a belt-and-braces flush through the
 gateway — the lecture can't be left dangling as LIVE. State lives in
 `~/.lecture-capture/` (pid, session, log).
 
+Speech and camera events are written to
+`~/.lecture-capture/outbox.sqlite3` **before** HTTP delivery. A network outage,
+recorder restart, or lost response therefore cannot lose material. Retries use
+a stable `client_event_id`, and Knottra deduplicates that id transactionally.
+If Whisper falls more than 30 seconds behind the microphone, new audio blocks
+spill to session-scoped WAV files under `~/.lecture-capture/audio-spool/`
+instead of growing RAM or dropping speech. Each transcript is timestamped at
+the first speech sample, not after transcription finishes, so it aligns with
+the correct board image.
+
 ## Run (foreground)
 
 ```bash
@@ -175,6 +185,8 @@ real camera: add `--test-frame`. Aim a PTZ camera interactively with
 | `--track` | Legacy alias for `--follow-teacher` |
 | `--lost-delay` | Delay before a full unzoom and semantic re-scout (default 1.5s) |
 | `--share-with-zoom` | Publish the owned physical feed as an OBS Virtual Camera (Windows) |
+| `--audience-zone` | Normalized polygon always masked from uploads/scouts; repeatable (default: lower 38%) |
+| `--privacy-min-confidence` | Reject a board frame when a weak person detection overlaps it (default 0.35) |
 | `--pan-sign` / `--tilt-sign` | Set either to `-1` if that motor moves away from the target |
 | `--pan` / `--tilt` / `--zoom` | Initial PTZ position (UVC cameras only) |
 | `--send-interval` | Board capture/enqueue cadence (default 10s; `--min-send` is an alias) |
@@ -185,7 +197,7 @@ real camera: add `--test-frame`. Aim a PTZ camera interactively with
 
 `--follow-teacher` starts from the widest zoom and asks `/api/aim` to identify
 the standing lecturer in the teaching zone. The semantic prompt explicitly
-rejects seated attendees and foreground backs. Local YOLO then tracks that
+rejects seated attendees and foreground backs. Local YOLO segmentation then tracks that
 person cheaply between semantic scouts. Candidate selection also requires
 board proximity, rejects large/low foreground detections, and strongly prefers
 the same person over time, so a student crossing the image does not steal the
@@ -196,17 +208,34 @@ the camera zooms fully out once, waits briefly for the motor, and performs a
 new semantic scout. Motor directions are calibrated independently with
 `--pan-sign` and `--tilt-sign`; `--flip-180` reverses both automatically.
 
-Tracking and note capture use different regions: PTZ follows the lecturer, but
-the image sent to Knottra is cropped to the writing surface. Within every
+PTZ movement uses the padded union of **teacher + board**, and refuses to move
+when either one is unconfirmed. The teacher can therefore walk along the board
+without the camera centering them so tightly that Zoom viewers lose the
+writing. The image sent to Knottra is still cropped to the writing surface. Within every
 10-second interval the agent retains the sharpest frame with the least teacher
 occlusion. The blue preview rectangle is the board sent to Knottra; green is
 the lecturer being tracked.
 
 Capture is privacy-fail-closed: if no writing-surface bbox is confirmed, no
-room image is uploaded. Detected people intersecting the board crop are heavily
-pixelated/blurred, and foreground attendees are masked before semantic scout
+room image is uploaded. The lower 38% of the frame is an always-masked default
+audience polygon, independent of person detection. YOLO segmentation masks
+detected silhouettes; a weak overlapping detection rejects the complete frame;
+and a local face detector adds another blur pass where the installed OpenCV
+build supports it. Foreground attendees are also masked before semantic scout
 images reach `/api/aim`. Each selected image retains its actual capture
-timestamp instead of being timestamped later when the HTTP request completes.
+timestamp, expires after 15 seconds, and is invalidated immediately after any
+PTZ movement.
+
+Calibrate a different desk boundary in PowerShell with normalized coordinates
+(top-left is `0,0`, bottom-right is `1,1`):
+
+```powershell
+uv run lecture-camera --class algorithms-2026 --follow-teacher `
+  --audience-zone "0,0.70;1,0.70;1,1;0,1"
+```
+
+Repeat `--audience-zone` for non-rectangular/disconnected seating areas, or set
+`CAMERA_AUDIENCE_ZONES`; separate multiple environment polygons with `|`.
 
 ### Running alongside Zoom on Windows
 
@@ -229,7 +258,9 @@ starting `lecture-camera`, then switch Zoom to the virtual camera.
 The DirectShow → virtual-camera loop does not execute YOLO, LLM calls, or HTTP
 requests. Latest-frame analysis and a bounded retrying upload queue run in
 daemon workers, so slow inference or a temporary network outage cannot block
-Zoom video or camera frame acquisition.
+Zoom video or camera frame acquisition. Every selected board image is also
+placed in the SQLite outbox before it can be displaced from the bounded memory
+queue, and an idle worker keeps retrying the durable backlog.
 
 ### Autonomous aiming (`--auto-aim`)
 

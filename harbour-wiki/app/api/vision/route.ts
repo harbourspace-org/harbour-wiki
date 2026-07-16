@@ -21,6 +21,7 @@ const bodySchema = z.object({
   modality: z.enum(["board", "slide", "desk"]).default("board"),
   image: z.string().min(100).max(MAX_IMAGE_B64), // base64 JPEG (no data: prefix)
   timestamp: z.string().min(1).optional(),
+  clientEventId: z.string().min(8).max(128).optional(),
 });
 
 function authorized(req: NextRequest): boolean {
@@ -40,12 +41,13 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const { session, modality, image, timestamp } = parsed.data;
+  const { session, modality, image, timestamp, clientEventId } = parsed.data;
   const imageB64 = image.replace(/^data:image\/\w+;base64,/, "");
 
   try {
     await ingest(session, [
       {
+        client_event_id: clientEventId,
         timestamp: timestamp ?? new Date().toISOString(),
         modality,
         content: "",

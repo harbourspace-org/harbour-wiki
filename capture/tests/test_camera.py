@@ -22,10 +22,12 @@ from lecture_capture.camera import (
     make_test_board,
     mean_diff,
     motion_centroid_x,
+    joint_framing_bbox,
     privacy_board_crop,
     privacy_semantic_scout,
     small_gray,
 )
+from lecture_capture.aiming import PersonDetection
 
 
 def blank(level: int = 200) -> np.ndarray:
@@ -176,6 +178,14 @@ def test_board_upload_fails_closed_without_confirmed_bbox():
     assert privacy_board_crop(frame, None, []) is None
 
 
+def test_joint_framing_requires_teacher_and_board_and_contains_both():
+    teacher = (850, 150, 120, 330)
+    board = (120, 90, 700, 400)
+    assert joint_framing_bbox(teacher, None, 1280, 720) is None
+    union = joint_framing_bbox(teacher, board, 1280, 720, padding=0)
+    assert union == (120, 90, 850, 400)
+
+
 def test_privacy_crop_masks_person_inside_board():
     frame = make_test_board()
     board = (40, 40, 900, 500)
@@ -185,6 +195,31 @@ def test_privacy_crop_masks_person_inside_board():
     assert unmasked is not None and masked is not None
     assert masked.shape == unmasked.shape
     assert not np.array_equal(masked, unmasked)
+
+
+def test_privacy_crop_masks_calibrated_audience_without_detection():
+    frame = np.full((200, 300, 3), 240, np.uint8)
+    board = (0, 0, 300, 200)
+    zone = (((0.0, 0.5), (1.0, 0.5), (1.0, 1.0), (0.0, 1.0)),)
+    cropped = privacy_board_crop(frame, board, [], audience_zones=zone)
+    assert cropped is not None
+    assert np.all(cropped[120:] == 127)
+
+
+def test_privacy_crop_fails_closed_on_weak_person_overlap():
+    frame = make_test_board()
+    weak_person = PersonDetection((200, 100, 180, 300), 0.21)
+    assert privacy_board_crop(frame, (40, 40, 900, 500), [weak_person]) is None
+
+
+def test_privacy_crop_uses_segmentation_mask():
+    frame = make_test_board()
+    mask = np.zeros(frame.shape[:2], dtype=bool)
+    mask[120:300, 220:300] = True
+    person = PersonDetection((200, 100, 160, 260), 0.9, mask)
+    cropped = privacy_board_crop(frame, (40, 40, 900, 500), [person])
+    assert cropped is not None
+    assert not np.array_equal(cropped[80:280, 160:280], frame[80:280, 160:280])
 
 
 def test_semantic_scout_masks_foreground_but_keeps_teacher_zone():
@@ -211,6 +246,44 @@ def test_upload_worker_preserves_capture_timestamp():
     worker.close()
     assert worker.sent == 1
     assert calls[0][1] == captured_at
+
+
+def test_upload_worker_persists_frames_before_bounded_queue_can_drop_them():
+    send_started = threading.Event()
+    release_send = threading.Event()
+    persisted = []
+
+    def fake_send(image_b64, captured_at):
+        send_started.set()
+        release_send.wait(timeout=1.0)
+        return {"ingested": 1}
+
+    def persist(image_b64, captured_at):
+        persisted.append(captured_at)
+
+    worker = SnapshotUploadWorker(fake_send, max_pending=1, persist_frame=persist)
+    base = datetime(2026, 7, 16, 10, 0, tzinfo=timezone.utc)
+    worker.submit(BoardSnapshot(make_test_board(), base, 1.0))
+    assert send_started.wait(timeout=1.0)
+    worker.submit(BoardSnapshot(make_test_board(), base.replace(second=1), 1.0))
+    worker.submit(BoardSnapshot(make_test_board(), base.replace(second=2), 1.0))
+    assert len(persisted) == 3
+    assert worker.dropped == 1
+    release_send.set()
+    worker.close()
+
+
+def test_best_board_frame_expires_stale_snapshot():
+    buffer = BestBoardFrame(audience_zones=())
+    captured_at = datetime(2026, 7, 16, 10, 0, tzinfo=timezone.utc)
+    assert buffer.offer(make_test_board(), (0, 0, 1280, 720), [], captured_at)
+    assert (
+        buffer.peek(
+            now=datetime(2026, 7, 16, 10, 0, 16, tzinfo=timezone.utc),
+            max_age_seconds=15,
+        )
+        is None
+    )
 
 
 def test_analysis_worker_keeps_latest_frame_without_blocking_submit(monkeypatch):

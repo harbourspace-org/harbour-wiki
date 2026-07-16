@@ -34,6 +34,12 @@ CHANGE_THRESHOLD = 6.0  # how different from the LAST SENT frame counts as new
 SEND_MAX_WIDTH = 1280
 JPEG_QUALITY = 70
 
+NormalizedPolygon = tuple[tuple[float, float], ...]
+DEFAULT_AUDIENCE_ZONES: tuple[NormalizedPolygon, ...] = (
+    ((0.0, 0.62), (1.0, 0.62), (1.0, 1.0), (0.0, 1.0)),
+)
+PRIVACY_MIN_PERSON_CONFIDENCE = 0.35
+
 
 @dataclass(frozen=True)
 class CameraOptions:
@@ -57,6 +63,8 @@ class CameraOptions:
     )
     pan_sign: int = 1
     tilt_sign: int = 1
+    audience_zones: tuple[NormalizedPolygon, ...] = DEFAULT_AUDIENCE_ZONES
+    privacy_min_person_confidence: float = PRIVACY_MIN_PERSON_CONFIDENCE
 
 
 # --------------------------------------------------------------------------- #
@@ -186,6 +194,7 @@ class BoardSnapshot:
     frame: np.ndarray
     captured_at: datetime
     score: float
+    image_b64: str | None = None
 
 
 def _board_crop_bounds(
@@ -222,17 +231,99 @@ def _anonymize_region(image: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> 
     image[y0:y1, x0:x1] = pixelated
 
 
+def _person_parts(person) -> tuple[tuple[int, int, int, int], float, np.ndarray | None]:
+    """Accept both PersonDetection and legacy bbox tuples in pure tests."""
+    if hasattr(person, "bbox"):
+        return person.bbox, float(person.confidence), getattr(person, "mask", None)
+    return person, 1.0, None
+
+
+def _zone_mask(
+    frame_shape: tuple[int, ...], zones: tuple[NormalizedPolygon, ...]
+) -> np.ndarray:
+    height, width = frame_shape[:2]
+    mask = np.zeros((height, width), np.uint8)
+    for zone in zones:
+        if len(zone) < 3:
+            continue
+        points = np.array(
+            [
+                (
+                    round(max(0.0, min(1.0, x)) * (width - 1)),
+                    round(max(0.0, min(1.0, y)) * (height - 1)),
+                )
+                for x, y in zone
+            ],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(mask, [points], 255)
+    return mask
+
+
+def _anonymize_mask(image: np.ndarray, mask: np.ndarray) -> None:
+    ys, xs = np.where(mask > 0)
+    if not len(xs):
+        return
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    original = image.copy()
+    _anonymize_region(image, x0, y0, x1, y1)
+    # Keep legible board pixels outside the dilated person silhouette.
+    image[mask == 0] = original[mask == 0]
+
+
+_face_cascade = None
+
+
+def _blur_detected_faces(image: np.ndarray) -> None:
+    """Supplement person segmentation with OpenCV's local face detector."""
+    global _face_cascade
+    cascade_type = getattr(cv2, "CascadeClassifier", None)
+    data = getattr(cv2, "data", None)
+    if cascade_type is None or data is None:
+        # OpenCV 5 preview wheels omit the legacy cascade API. Person
+        # segmentation + the hard audience polygon remain mandatory.
+        return
+    if _face_cascade is None:
+        path = data.haarcascades + "haarcascade_frontalface_default.xml"
+        _face_cascade = cascade_type(path)
+    if _face_cascade.empty():
+        return
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    for x, y, width, height in _face_cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=4, minSize=(20, 20)
+    ):
+        margin_x, margin_y = int(width * 0.25), int(height * 0.35)
+        _anonymize_region(
+            image,
+            max(0, x - margin_x),
+            max(0, y - margin_y),
+            min(image.shape[1], x + width + margin_x),
+            min(image.shape[0], y + height + margin_y),
+        )
+
+
 def privacy_semantic_scout(
-    frame: np.ndarray, people: list[tuple[int, int, int, int]]
+    frame: np.ndarray,
+    people: list,
+    audience_zones: tuple[NormalizedPolygon, ...] = DEFAULT_AUDIENCE_ZONES,
 ) -> np.ndarray:
     """Mask seated/foreground people before a room image reaches the aim LLM."""
     protected = frame.copy()
     frame_h, frame_w = protected.shape[:2]
-    for x, y, width, height in people:
+    # This is independent of person detection: even a missed student in the
+    # calibrated desk area cannot reach the semantic service.
+    protected[_zone_mask(protected.shape, audience_zones) > 0] = 127
+    for person in people:
+        (x, y, width, height), _, mask = _person_parts(person)
         cy = (y + height / 2) / frame_h
         bottom = (y + height) / frame_h
         is_foreground = cy > 0.64 or bottom > 0.88 or width / frame_w > 0.48
         if not is_foreground:
+            continue
+        if mask is not None and mask.shape == (frame_h, frame_w):
+            expanded = cv2.dilate(mask.astype(np.uint8), np.ones((15, 15), np.uint8))
+            _anonymize_mask(protected, expanded)
             continue
         x0, y0 = max(0, x), max(0, y)
         x1, y1 = min(frame_w, x + width), min(frame_h, y + height)
@@ -243,7 +334,9 @@ def privacy_semantic_scout(
 def privacy_board_crop(
     frame: np.ndarray,
     board_bbox: tuple[int, int, int, int] | None,
-    people: list[tuple[int, int, int, int]],
+    people: list,
+    audience_zones: tuple[NormalizedPolygon, ...] = DEFAULT_AUDIENCE_ZONES,
+    min_person_confidence: float = PRIVACY_MIN_PERSON_CONFIDENCE,
 ) -> np.ndarray | None:
     """Return only the confirmed board, heavily anonymizing intersecting people.
 
@@ -259,40 +352,93 @@ def privacy_board_crop(
     x0, y0, x1, y1 = bounds
     cropped = frame[y0:y1, x0:x1].copy()
 
-    for px, py, pw, ph in people:
+    # Mask the calibrated desk/audience geometry even when YOLO misses a
+    # person entirely. This is intentionally destructive and fail-safe.
+    forbidden = _zone_mask(frame.shape, audience_zones)[y0:y1, x0:x1]
+    cropped[forbidden > 0] = 127
+
+    for person in people:
+        (px, py, pw, ph), confidence, mask = _person_parts(person)
         ix0, iy0 = max(x0, px), max(y0, py)
         ix1, iy1 = min(x1, px + pw), min(y1, py + ph)
         if ix1 <= ix0 or iy1 <= iy0:
             continue
+        # A weak overlapping detection means "possibly a person". Refusing
+        # the whole upload is safer than trusting a noisy silhouette.
+        if confidence < min_person_confidence:
+            return None
         rx0, ry0 = ix0 - x0, iy0 - y0
         rx1, ry1 = ix1 - x0, iy1 - y0
-        # Strong pixelation followed by blur removes facial detail while also
-        # honestly marking board pixels that were occluded by that person.
-        _anonymize_region(cropped, rx0, ry0, rx1, ry1)
+        if mask is not None and mask.shape == frame.shape[:2]:
+            person_mask = mask[y0:y1, x0:x1].astype(np.uint8)
+            person_mask = cv2.dilate(person_mask, np.ones((15, 15), np.uint8))
+            _anonymize_mask(cropped, person_mask)
+        else:
+            # Conservative fallback for detectors without segmentation.
+            _anonymize_region(cropped, rx0, ry0, rx1, ry1)
+    _blur_detected_faces(cropped)
     return cropped
+
+
+def joint_framing_bbox(
+    teacher_bbox: tuple[int, int, int, int] | None,
+    board_bbox: tuple[int, int, int, int] | None,
+    frame_w: int,
+    frame_h: int,
+    padding: float = 0.04,
+) -> tuple[int, int, int, int] | None:
+    """Union the lecturer and board; require both before moving the camera."""
+    if teacher_bbox is None or board_bbox is None:
+        return None
+    tx, ty, tw, th = teacher_bbox
+    bx, by, bw, bh = board_bbox
+    x0, y0 = min(tx, bx), min(ty, by)
+    x1, y1 = max(tx + tw, bx + bw), max(ty + th, by + bh)
+    pad_x, pad_y = int((x1 - x0) * padding), int((y1 - y0) * padding)
+    x0, y0 = max(0, x0 - pad_x), max(0, y0 - pad_y)
+    x1, y1 = min(frame_w, x1 + pad_x), min(frame_h, y1 + pad_y)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1 - x0, y1 - y0
 
 
 class BestBoardFrame:
     """Keep the best recent privacy-filtered board view for one interval."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        audience_zones: tuple[NormalizedPolygon, ...] = DEFAULT_AUDIENCE_ZONES,
+        min_person_confidence: float = PRIVACY_MIN_PERSON_CONFIDENCE,
+    ) -> None:
         self._snapshot: BoardSnapshot | None = None
+        self._audience_zones = audience_zones
+        self._min_person_confidence = min_person_confidence
 
     def offer(
         self,
         frame: np.ndarray,
         board_bbox: tuple[int, int, int, int] | None,
-        people: list[tuple[int, int, int, int]],
+        people: list,
         captured_at: datetime,
     ) -> bool:
-        out = privacy_board_crop(frame, board_bbox, people)
+        out = privacy_board_crop(
+            frame,
+            board_bbox,
+            people,
+            self._audience_zones,
+            self._min_person_confidence,
+        )
         if out is None:
             return False
         gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
         sharpness = min(2500.0, float(cv2.Laplacian(gray, cv2.CV_64F).var()))
         occlusion = min(
             1.0,
-            sum(_bbox_overlap_fraction(person, board_bbox) for person in people),
+            sum(
+                _bbox_overlap_fraction(_person_parts(person)[0], board_bbox)
+                for person in people
+            ),
         )
         score = sharpness - 1800.0 * occlusion
         # A modest recency bias prevents an extremely sharp frame from the
@@ -304,7 +450,19 @@ class BestBoardFrame:
             self._snapshot = BoardSnapshot(out, captured_at, score)
         return True
 
-    def peek(self) -> BoardSnapshot | None:
+    def peek(
+        self,
+        *,
+        now: datetime | None = None,
+        max_age_seconds: float | None = None,
+    ) -> BoardSnapshot | None:
+        if (
+            self._snapshot is not None
+            and now is not None
+            and max_age_seconds is not None
+            and (now - self._snapshot.captured_at).total_seconds() > max_age_seconds
+        ):
+            self._snapshot = None
         return self._snapshot
 
     def clear(self) -> None:
@@ -366,7 +524,7 @@ class FrameAnalysis:
     observed_at: float
     target_bbox: tuple[int, int, int, int] | None
     content_bbox: tuple[int, int, int, int] | None
-    people: list[tuple[int, int, int, int]]
+    people: list
     error: str | None = None
 
 
@@ -374,12 +532,18 @@ class FrameAnalysisWorker:
     """Latest-frame YOLO/LLM worker; never owns the camera or PTZ COM object."""
 
     def __init__(
-        self, *, follow_teacher: bool, modality: str, locate_target=None
+        self,
+        *,
+        follow_teacher: bool,
+        modality: str,
+        locate_target=None,
+        audience_zones: tuple[NormalizedPolygon, ...] = DEFAULT_AUDIENCE_ZONES,
     ) -> None:
         from .aiming import LLMAimDetector, TeacherTracker
 
         self._follow_teacher = follow_teacher
         self._modality = modality
+        self._audience_zones = audience_zones
         self._teacher_tracker = TeacherTracker() if follow_teacher else None
         self._target_eyes = (
             LLMAimDetector(
@@ -475,10 +639,11 @@ class FrameAnalysisWorker:
             try:
                 local_content = detect_target(job.frame)
                 detections = detect_people(job.frame)
-                people = [person.bbox for person in detections]
                 semantic_target = None
                 if use_semantic:
-                    scout_frame = privacy_semantic_scout(job.frame, people)
+                    scout_frame = privacy_semantic_scout(
+                        job.frame, detections, self._audience_zones
+                    )
                     if self._board_eyes is not None:
                         semantic_board = self._board_eyes.locate(scout_frame)
                         if semantic_board is not None:
@@ -513,7 +678,7 @@ class FrameAnalysisWorker:
                     job.observed_at,
                     target_bbox,
                     content_bbox,
-                    people,
+                    detections,
                 )
             except Exception as error:  # noqa: BLE001 — fail closed on any detector failure
                 result = FrameAnalysis(
@@ -535,8 +700,17 @@ class FrameAnalysisWorker:
 class SnapshotUploadWorker:
     """Bounded retrying uploader so network latency never pauses the camera."""
 
-    def __init__(self, send_frame, max_pending: int = 3) -> None:
+    def __init__(
+        self,
+        send_frame,
+        max_pending: int = 3,
+        *,
+        persist_frame=None,
+        drain_pending=None,
+    ) -> None:
         self._send_frame = send_frame
+        self._persist_frame = persist_frame
+        self._drain_pending = drain_pending
         self._queue: queue.Queue[BoardSnapshot] = queue.Queue(maxsize=max_pending)
         self._stopping = threading.Event()
         self._lock = threading.Lock()
@@ -562,8 +736,21 @@ class SnapshotUploadWorker:
     def submit(self, snapshot: BoardSnapshot) -> bool:
         if self._stopping.is_set():
             return False
+        encoded = snapshot.image_b64 or encode_jpeg_b64(snapshot.frame)
+        if self._persist_frame is not None:
+            try:
+                self._persist_frame(encoded, snapshot.captured_at)
+            except Exception as error:  # noqa: BLE001 — local disk failure, fail closed
+                print(f"[camera] could not persist board frame: {error}", flush=True)
+                return False
+        queued = BoardSnapshot(
+            snapshot.frame,
+            snapshot.captured_at,
+            snapshot.score,
+            encoded,
+        )
         try:
-            self._queue.put_nowait(snapshot)
+            self._queue.put_nowait(queued)
             return True
         except queue.Full:
             # Prefer recent board state over stale backlog after a network
@@ -575,7 +762,7 @@ class SnapshotUploadWorker:
                 pass
             with self._lock:
                 self._dropped += 1
-            self._queue.put_nowait(snapshot)
+            self._queue.put_nowait(queued)
             print(
                 "[camera] upload backlog full — dropped oldest pending frame",
                 flush=True,
@@ -591,6 +778,12 @@ class SnapshotUploadWorker:
             try:
                 snapshot = self._queue.get(timeout=0.2)
             except queue.Empty:
+                if self._drain_pending is not None:
+                    try:
+                        self._drain_pending()
+                    except Exception:
+                        pass  # durable outbox remains for the next retry
+                    self._stopping.wait(1.0)
                 continue
             success = False
             try:
@@ -599,7 +792,8 @@ class SnapshotUploadWorker:
                         break
                     try:
                         result = self._send_frame(
-                            encode_jpeg_b64(snapshot.frame), snapshot.captured_at
+                            snapshot.image_b64 or encode_jpeg_b64(snapshot.frame),
+                            snapshot.captured_at,
                         )
                         if not result.get("ingested"):
                             raise RuntimeError("server returned ingested=0")
@@ -809,7 +1003,14 @@ def probe_devices(max_index: int = 10) -> list[tuple[int, int, int, bool]]:
     return found
 
 
-def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
+def run_agent(
+    opts: CameraOptions,
+    send_frame,
+    locate_target=None,
+    *,
+    persist_frame=None,
+    drain_pending=None,
+) -> int:
     """Run capture without letting inference or uploads stall the video feed.
 
     ``send_frame(image_b64, captured_at) -> dict`` runs in a bounded upload
@@ -832,7 +1033,10 @@ def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
         print(f"[camera] PTZ applied (supported={ptz.supported})", flush=True)
 
     aimer = (
-        AimController(fill_target=0.32)
+        # The moving target is the union of lecturer + board, not the lecturer
+        # alone. A wide target prevents Zoom viewers and board snapshots from
+        # losing the instructional surface while the lecturer walks.
+        AimController(fill_target=0.68)
         if follow_teacher
         else (AimController() if opts.auto_aim else None)
     )
@@ -840,10 +1044,18 @@ def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
         follow_teacher=follow_teacher,
         modality="board" if opts.modality == "desk" else opts.modality,
         locate_target=locate_target,
+        audience_zones=opts.audience_zones,
     )
-    uploader = SnapshotUploadWorker(send_frame)
+    uploader = SnapshotUploadWorker(
+        send_frame,
+        persist_frame=persist_frame,
+        drain_pending=drain_pending,
+    )
     policy = PeriodicSnapshotPolicy(interval_seconds=opts.min_send_seconds)
-    best_board_frame = BestBoardFrame()
+    best_board_frame = BestBoardFrame(
+        audience_zones=opts.audience_zones,
+        min_person_confidence=opts.privacy_min_person_confidence,
+    )
 
     virtual_output: VirtualCameraOutput | None = None
     frame_seq = 0
@@ -854,13 +1066,14 @@ def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
 
     last_target_bbox = None
     last_content_bbox = None
-    last_seen_at: float | None = None
+    last_seen_at: float | None = time.monotonic() if follow_teacher else None
     zoomed_out = False
     aim_settled = False
     pan_tilt_ready_at = float("-inf")
     search_not_before = float("-inf")
     last_analysis_error: str | None = None
     last_privacy_wait_log_at = float("-inf")
+    last_semantic_request_at = float("-inf")
 
     center_deadband_x = 0.12
     center_deadband_y = 0.18
@@ -877,6 +1090,9 @@ def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
         ignore_analysis_through_seq = max(ignore_analysis_through_seq, current_seq)
         last_target_bbox = None
         last_content_bbox = None
+        # A crop captured before a physical move no longer represents the
+        # current view and must never satisfy the next periodic upload.
+        best_board_frame.clear()
 
     try:
         while True:
@@ -964,13 +1180,24 @@ def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
                         result.captured_at,
                     )
 
-                    if result.target_bbox is not None:
+                    framing_target = (
+                        joint_framing_bbox(
+                            result.target_bbox,
+                            result.content_bbox,
+                            result.frame.shape[1],
+                            result.frame.shape[0],
+                        )
+                        if follow_teacher
+                        else result.target_bbox
+                    )
+
+                    if framing_target is not None:
                         last_seen_at = result.observed_at
                         zoomed_out = False
 
                     command = (
                         aimer.observe(
-                            result.target_bbox,
+                            framing_target,
                             result.frame.shape[1],
                             result.frame.shape[0],
                         )
@@ -981,12 +1208,12 @@ def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
 
                     if (
                         follow_teacher
-                        and result.target_bbox is not None
+                        and framing_target is not None
                         and ptz.supported
                         and now >= search_not_before
                         and motion_result_fresh
                     ):
-                        x, y, width, height = result.target_bbox
+                        x, y, width, height = framing_target
                         cx = (x + width / 2) / result.frame.shape[1]
                         cy = (y + height / 2) / result.frame.shape[0]
                         pulsed = False
@@ -1024,13 +1251,13 @@ def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
 
                     if (
                         follow_teacher
-                        and result.target_bbox is None
+                        and framing_target is None
                         and last_seen_at is not None
                         and result.observed_at - last_seen_at >= opts.lost_delay_seconds
                         and not zoomed_out
                     ):
                         print(
-                            "[camera] lecturer lost — zooming out and re-scouting",
+                            "[camera] teacher/board framing lost — zooming out and re-scouting",
                             flush=True,
                         )
                         if ptz.supported:
@@ -1064,8 +1291,22 @@ def run_agent(opts: CameraOptions, send_frame, locate_target=None) -> int:
                         aim_settled = True
                         print("[camera] aim settled — target framed", flush=True)
 
+            if (
+                follow_teacher
+                and zoomed_out
+                and now >= search_not_before
+                and now - last_semantic_request_at >= 3.0
+            ):
+                # Keep searching at a low cadence while the room is wide. A
+                # single failed semantic request must not strand the camera.
+                analysis.request_semantic_scout(reset_tracking=False)
+                last_semantic_request_at = now
+
             if policy.due(now):
-                snapshot = best_board_frame.peek()
+                snapshot = best_board_frame.peek(
+                    now=datetime.now(timezone.utc),
+                    max_age_seconds=max(15.0, opts.min_send_seconds * 1.5),
+                )
                 if snapshot is None:
                     if now - last_privacy_wait_log_at >= 5.0:
                         print(
