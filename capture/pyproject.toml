@@ -14,6 +14,7 @@ dependencies = [
     "pyvirtualcam>=0.15; sys_platform == 'win32'",
     "ultralytics>=8.4.96",
     "tzdata>=2025.2; sys_platform == 'win32'",
+    "psutil>=6.0",
 ]
 
 [project.scripts]
@@ -22,6 +23,9 @@ lecture-simulate = "lecture_capture.simulate:main"
 lecture-camera = "lecture_capture.camera_cli:main"
 lecturectl = "lecture_capture.control:main"
 lecture-scheduler = "lecture_capture.scheduler:main"
+zoom-watcher = "lecture_capture.zoom_watcher:main"
+start-lecture = "lecture_capture.start_lecture:main"
+stop-lecture = "lecture_capture.stop_lecture:main"
 
 [build-system]
 requires = ["hatchling"]

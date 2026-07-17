@@ -40,6 +40,13 @@ _FLOOR_MULTIPLIER = 2.0  # speech must rise this far above the noise floor
 _FLOOR_CEILING = 0.003  # noise-floor estimate may never creep into speech range
 _FLOOR_EWMA = 0.05  # how fast the noise-floor estimate adapts
 
+# Auto-gain for quiet mics/rooms: some hardware (e.g. a conference speakerphone
+# at low input level) produces real speech only slightly above
+# _ABS_SPEECH_FLOOR, too close to reliably clear the noise-floor multiplier.
+# Boost each block toward a target RMS before the speech gate ever sees it.
+_AUTO_GAIN_TARGET_RMS = 0.02
+_AUTO_GAIN_MAX = 12.0  # cap so near-silence isn't amplified into noise
+
 MIC_BLOCK_SECONDS = 0.1
 MIC_MEMORY_SECONDS = 30.0
 
@@ -83,6 +90,20 @@ class UtteranceChunker:
         self._speech_started_at: datetime | None = None
         self._last_ended_at: datetime | None = None
 
+    @staticmethod
+    def _auto_gain(block: np.ndarray) -> np.ndarray:
+        """Boost a quiet block toward the target RMS before anything else sees
+        it — some hardware (e.g. a conference speakerphone at low input
+        level) otherwise produces speech too close to the noise-floor gate
+        to ever be recognized as speech at all."""
+        if block.size == 0:
+            return block
+        rms = float(np.sqrt(np.mean(np.square(block))))
+        if rms < 1e-6 or rms >= _AUTO_GAIN_TARGET_RMS:
+            return block
+        gain = min(_AUTO_GAIN_MAX, _AUTO_GAIN_TARGET_RMS / rms)
+        return np.clip(block * gain, -1.0, 1.0)
+
     def _is_speech(self, block: np.ndarray) -> bool:
         rms = float(np.sqrt(np.mean(np.square(block)))) if block.size else 0.0
         threshold = max(_ABS_SPEECH_FLOOR, self._noise_floor * _FLOOR_MULTIPLIER)
@@ -124,6 +145,7 @@ class UtteranceChunker:
         started_at: datetime | None,
         ended_at: datetime | None,
     ) -> tuple[np.ndarray, datetime | None, datetime | None] | None:
+        block = self._auto_gain(block)
         speech = self._is_speech(block)
         self._buffer.append(block)
         self._buffered += len(block)

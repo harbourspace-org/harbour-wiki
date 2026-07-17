@@ -1100,7 +1100,7 @@ def run_agent(
 
     center_deadband_x = 0.12
     center_deadband_y = 0.18
-    pan_tilt_cooldown_seconds = 0.8
+    pan_tilt_cooldown_seconds = 0.4  # was 0.8 — too far above the 0.35s analysis cadence, felt sluggish
 
     if track_physically and ptz.supported:
         ptz.zoom_out_full()
@@ -1257,7 +1257,13 @@ def run_agent(
                             pan_tilt_ready_at = now + pan_tilt_cooldown_seconds
                             invalidate_coordinates(frame_seq)
                             aim_settled = False
-                        elif command is not None and command.zoom:
+                        # Zoom is independent of pan/tilt (this was previously
+                        # `elif`, so any pending pan/tilt correction — which
+                        # fires often, since natural movement rarely holds
+                        # perfectly centered — starved zoom out entirely).
+                        # Zoom behaves smoothly/incrementally and is safe to
+                        # apply the same tick as a pan/tilt pulse.
+                        if command is not None and command.zoom:
                             ptz.nudge_zoom(command.zoom * PTZ.ZOOM_STEP)
                             invalidate_coordinates(frame_seq)
                             aim_settled = False

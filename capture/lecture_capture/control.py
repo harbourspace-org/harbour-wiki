@@ -27,6 +27,8 @@ import sys
 import time
 from pathlib import Path
 
+import psutil
+
 STATE_DIR = Path.home() / ".lecture-capture"
 PID_FILE = STATE_DIR / "recorder.pid"
 STATE_FILE = STATE_DIR / "state.json"  # written by cli.main once the session is known
@@ -38,13 +40,10 @@ STOP_GRACE_SECONDS = 25.0
 
 
 def pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, ValueError):
-        return False
-    except PermissionError:
-        return True
-    return True
+    # os.kill(pid, 0) — the usual POSIX "does it exist" probe — isn't
+    # supported on Windows (signal 0 raises WinError 87); psutil is
+    # cross-platform and already a dependency.
+    return psutil.pid_exists(pid)
 
 
 def read_pid() -> int | None:
@@ -125,16 +124,22 @@ def cmd_stop() -> int:
     if pid is None:
         print("recorder is not running")
     else:
-        if os.name == "nt":  # pragma: no cover
-            os.kill(pid, signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
-        else:
-            os.kill(pid, signal.SIGINT)
+        try:
+            if os.name == "nt":  # pragma: no cover
+                os.kill(pid, signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+            else:
+                os.kill(pid, signal.SIGINT)
+        except OSError as error:
+            # Console-signal delivery can fail depending on how the caller
+            # itself is attached to a console (WinError 87 and similar) —
+            # that must not skip the belt-and-braces gateway flush below.
+            print(f"graceful signal failed ({error}) — will force-terminate", flush=True)
         deadline = time.monotonic() + STOP_GRACE_SECONDS
         while pid_alive(pid) and time.monotonic() < deadline:
             time.sleep(0.5)
         if pid_alive(pid):
             print("recorder did not exit in time — terminating")
-            os.kill(pid, signal.SIGTERM)
+            psutil.Process(pid).terminate()
         else:
             print("recorder stopped")
     PID_FILE.unlink(missing_ok=True)
