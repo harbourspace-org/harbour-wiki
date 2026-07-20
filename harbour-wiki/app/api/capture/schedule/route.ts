@@ -3,7 +3,11 @@ import { z } from "zod";
 
 import {
   captureOperatorAuthorized,
+  clearOperatorFailures,
   getScheduleForAgent,
+  noteOperatorFailure,
+  operatorKey,
+  operatorRateLimited,
   putSchedule,
 } from "@/lib/captureControl";
 
@@ -27,7 +31,6 @@ const scheduleBodySchema = z
   .passthrough();
 
 const uploadSchema = z.object({
-  key: z.string().min(1),
   agentId: agentIdSchema,
   schedule: scheduleBodySchema,
 });
@@ -36,6 +39,23 @@ function agentAuthorized(req: NextRequest): boolean {
   const token = process.env.CAPTURE_TOKEN;
   if (!token) return process.env.NODE_ENV !== "production";
   return req.headers.get("authorization") === `Bearer ${token}`;
+}
+
+function clientIp(req: NextRequest): string {
+  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+}
+
+function guardOperator(req: NextRequest): NextResponse | null {
+  const ip = clientIp(req);
+  if (operatorRateLimited(ip, Date.now())) {
+    return NextResponse.json({ error: "Too many attempts" }, { status: 429 });
+  }
+  if (!captureOperatorAuthorized(operatorKey(req.headers.get("authorization")))) {
+    noteOperatorFailure(ip, Date.now());
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  clearOperatorFailures(ip);
+  return null;
 }
 
 // Agent: fetch this machine's timetable, but only when it changed.
@@ -70,15 +90,14 @@ export async function POST(req: NextRequest) {
   if (declared > MAX_SCHEDULE_BYTES) {
     return NextResponse.json({ error: "Schedule too large" }, { status: 413 });
   }
+  const denied = guardOperator(req);
+  if (denied) return denied;
   const parsed = uploadSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
     return NextResponse.json(
       { error: "Invalid body", issues: parsed.error.issues },
       { status: 400 },
     );
-  }
-  if (!captureOperatorAuthorized(parsed.data.key)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   try {
     const { version } = await putSchedule(parsed.data.agentId, parsed.data.schedule);

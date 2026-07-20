@@ -122,8 +122,11 @@ function ScheduleEditor({
     try {
       const response = await fetch("/api/capture/schedule", {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ key: operatorKey, agentId, schedule }),
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${operatorKey}`,
+        },
+        body: JSON.stringify({ agentId, schedule }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
@@ -180,8 +183,9 @@ export function CaptureDashboard() {
   const refresh = useCallback(async () => {
     if (!key) return;
     try {
-      const response = await fetch(`/api/capture/control?key=${encodeURIComponent(key)}`, {
+      const response = await fetch("/api/capture/control", {
         cache: "no-store",
+        headers: { authorization: `Bearer ${key}` },
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
@@ -213,8 +217,11 @@ export function CaptureDashboard() {
     try {
       const response = await fetch("/api/capture/control", {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ key, agentId, kind, minutes: kind === "extend" ? 15 : undefined }),
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify({ agentId, kind, minutes: kind === "extend" ? 15 : undefined }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);

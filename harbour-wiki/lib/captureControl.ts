@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "crypto";
+
 import { q } from "@/lib/db";
 
 export type CaptureMoment = {
@@ -42,9 +44,47 @@ type CommandRow = {
   error: string | null;
 };
 
+// Operator auth is a dedicated secret — NO fallback to MCP_BEARER_TOKEN, which
+// may be handed to students/integrations and must never control recording hw.
 export function captureOperatorAuthorized(key: string | null | undefined): boolean {
-  const token = process.env.CAPTURE_DASHBOARD_TOKEN ?? process.env.MCP_BEARER_TOKEN;
-  return Boolean(token && key && key === token);
+  const token = process.env.CAPTURE_DASHBOARD_TOKEN;
+  if (!token || !key) return false;
+  const given = Buffer.from(key);
+  const expected = Buffer.from(token);
+  // Length check first — timingSafeEqual throws on length mismatch.
+  return given.length === expected.length && timingSafeEqual(given, expected);
+}
+
+// Read the operator key from the Authorization header (never a query param —
+// query strings leak into proxy/server logs and browser history).
+export function operatorKey(authorization: string | null | undefined): string | null {
+  if (!authorization) return null;
+  const match = /^Bearer\s+(.+)$/i.exec(authorization.trim());
+  return match ? match[1] : null;
+}
+
+// Small in-memory rate limiter for operator auth. Railway runs a long-lived
+// Node process, so this Map persists across requests and throttles brute force.
+const OPERATOR_WINDOW_MS = 5 * 60_000;
+const OPERATOR_MAX_FAILURES = 10;
+const operatorFailures = new Map<string, { count: number; resetAt: number }>();
+
+export function operatorRateLimited(ip: string, now: number): boolean {
+  const rec = operatorFailures.get(ip);
+  return Boolean(rec && now < rec.resetAt && rec.count >= OPERATOR_MAX_FAILURES);
+}
+
+export function noteOperatorFailure(ip: string, now: number): void {
+  const rec = operatorFailures.get(ip);
+  if (!rec || now >= rec.resetAt) {
+    operatorFailures.set(ip, { count: 1, resetAt: now + OPERATOR_WINDOW_MS });
+  } else {
+    rec.count += 1;
+  }
+}
+
+export function clearOperatorFailures(ip: string): void {
+  operatorFailures.delete(ip);
 }
 
 export async function recordHeartbeat(value: CaptureHeartbeat): Promise<void> {
