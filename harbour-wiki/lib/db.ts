@@ -81,6 +81,47 @@ CREATE TABLE IF NOT EXISTS harbour_wiki.usage_event (
   meta jsonb
 );
 CREATE INDEX IF NOT EXISTS ix_usage_event_at ON harbour_wiki.usage_event (at);
+-- Classroom capture agents report their health here. This table deliberately
+-- stores the latest snapshot only; lecture events remain in course_session.
+CREATE TABLE IF NOT EXISTS harbour_wiki.capture_agent (
+  agent_id text PRIMARY KEY,
+  hostname text NOT NULL,
+  scheduler_status text NOT NULL,
+  session_id text,
+  current_course_id text,
+  current_course_name text,
+  current_lecture int,
+  current_slot int,
+  current_started_at timestamptz,
+  current_ends_at timestamptz,
+  next_course_id text,
+  next_course_name text,
+  next_lecture int,
+  next_slot int,
+  next_starts_at timestamptz,
+  next_ends_at timestamptz,
+  audio_status text NOT NULL,
+  camera_status text NOT NULL,
+  zoom_status text NOT NULL,
+  outbox_pending int NOT NULL DEFAULT 0,
+  errors jsonb NOT NULL DEFAULT '[]'::jsonb,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS harbour_wiki.capture_command (
+  id bigserial PRIMARY KEY,
+  agent_id text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('stop', 'extend', 'skip')),
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  status text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'acknowledged', 'failed')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  delivered_at timestamptz,
+  completed_at timestamptz,
+  result text,
+  error text
+);
+CREATE INDEX IF NOT EXISTS ix_capture_command_pending
+  ON harbour_wiki.capture_command (agent_id, status, created_at);
 `;
 
 export function ready(): Promise<void> {

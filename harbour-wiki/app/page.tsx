@@ -56,6 +56,8 @@ export default async function Home() {
       )}
 
       <p className="footnote">
+        Classroom operator? <Link href="/capture">Open capture control</Link>.
+        <br />
         Built on <a href="https://github.com/harbourspace-org/knottra">Knottra</a>, the
         multi-stream fusion engine. Ask questions from Claude via the MCP endpoint.
       </p>

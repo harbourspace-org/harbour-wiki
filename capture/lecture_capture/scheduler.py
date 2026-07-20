@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -23,6 +24,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import control
+from .outbox import DurableOutbox
+from .remote_control import RemoteCommand, RemoteControlClient
 
 SLOTS: dict[int, tuple[clock_time, clock_time]] = {
     1: (clock_time(9, 0), clock_time(12, 30)),
@@ -75,6 +78,8 @@ class Schedule:
     workdir: Path
     audio: dict
     camera: dict
+    agent_id: str
+    heartbeat_seconds: float
 
 
 def _course_id(name: str) -> str:
@@ -196,10 +201,13 @@ def load_schedule(path: str | Path) -> Schedule:
         raise ValueError("schedule contains no enabled lessons")
     prewarm_seconds = float(raw.get("prewarm_seconds", 60))
     poll_seconds = float(raw.get("poll_seconds", 2))
+    heartbeat_seconds = float(raw.get("heartbeat_seconds", 5))
     if not 0 <= prewarm_seconds <= 1800:
         raise ValueError("prewarm_seconds must be within 0..1800")
     if not 0.25 <= poll_seconds <= 60:
         raise ValueError("poll_seconds must be within 0.25..60")
+    if not 2 <= heartbeat_seconds <= 60:
+        raise ValueError("heartbeat_seconds must be within 2..60")
     workdir = Path(raw.get("workdir") or schedule_path.parent).resolve()
     camera = dict(raw.get("camera") or {})
     if camera.get("modality", "board") not in {"board", "slide", "desk"}:
@@ -227,6 +235,8 @@ def load_schedule(path: str | Path) -> Schedule:
         workdir=workdir,
         audio=dict(raw.get("audio") or {}),
         camera=camera,
+        agent_id=str(raw.get("agent_id") or socket.gethostname()).strip(),
+        heartbeat_seconds=heartbeat_seconds,
     )
 
 
@@ -244,6 +254,9 @@ class StateStore:
             "active": state.get("active"),
             "completed": list(state.get("completed") or []),
             "missed": list(state.get("missed") or []),
+            "handled_commands": list(state.get("handled_commands") or []),
+            "command_results": list(state.get("command_results") or []),
+            "errors": list(state.get("errors") or []),
         }
 
     def write(self, state: dict) -> None:
@@ -266,6 +279,23 @@ class WindowsProcessController:
         if self.schedule.camera.get("enabled", True) is False:
             return True
         return pid is not None and control.pid_alive(pid)
+
+    def zoom_status(self) -> str:
+        if not self.schedule.camera.get("share_with_zoom", True):
+            return "disabled"
+        if os.name != "nt":
+            return "unknown"
+        try:  # pragma: no cover — Windows lecture PC
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq Zoom.exe", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            return "running" if '"Zoom.exe"' in result.stdout else "not-running"
+        except (OSError, subprocess.SubprocessError):
+            return "unknown"
 
     def _audio_args(self, lesson: Lesson) -> list[str]:
         args = [
@@ -413,6 +443,27 @@ class SchedulerEngine:
         self.store = store
         self.by_id = {lesson.occurrence_id: lesson for lesson in schedule.lessons}
 
+    @staticmethod
+    def _effective_end(active: dict, lesson: Lesson) -> datetime:
+        override = active.get("ends_at_override")
+        return datetime.fromisoformat(override) if override else lesson.ends_at
+
+    def _finish_active(self, state: dict, lesson: Lesson) -> bool:
+        active = state["active"]
+        camera_ok = self.controller.stop_camera(active.get("camera_pid"))
+        audio_ok = self.controller.stop_audio()
+        if not (camera_ok and audio_ok):
+            return False
+        if lesson.occurrence_id not in state["completed"]:
+            state["completed"].append(lesson.occurrence_id)
+        state["active"] = None
+        self.store.write(state)
+        print(
+            f"[scheduler] ended {lesson.course_name} lecture {lesson.lecture_number}",
+            flush=True,
+        )
+        return True
+
     def tick(self, now: datetime) -> None:
         state = self.store.read()
         active = state["active"]
@@ -420,17 +471,8 @@ class SchedulerEngine:
             lesson = self.by_id.get(active["occurrence_id"])
             if lesson is None:
                 raise RuntimeError("active lesson was removed from the schedule")
-            if now >= lesson.ends_at:
-                camera_ok = self.controller.stop_camera(active.get("camera_pid"))
-                audio_ok = self.controller.stop_audio()
-                if camera_ok and audio_ok:
-                    state["completed"].append(lesson.occurrence_id)
-                    state["active"] = None
-                    self.store.write(state)
-                    print(
-                        f"[scheduler] ended {lesson.course_name} lecture {lesson.lecture_number}",
-                        flush=True,
-                    )
+            if now >= self._effective_end(active, lesson):
+                self._finish_active(state, lesson)
                 return
             if not self.controller.audio_running():
                 if not self.controller.start_audio(lesson):
@@ -478,6 +520,143 @@ class SchedulerEngine:
             if now >= lesson.starts_at:
                 self.tick(now)
             return
+
+    def apply_command(self, command: RemoteCommand, now: datetime) -> dict:
+        state = self.store.read()
+        if command.id in state["handled_commands"]:
+            return {"id": command.id, "ok": True, "message": "already applied"}
+
+        ok = True
+        message = "done"
+        try:
+            if command.kind == "stop":
+                active = state["active"]
+                if active is None:
+                    raise RuntimeError("no active lecture")
+                lesson = self.by_id[active["occurrence_id"]]
+                if not self._finish_active(state, lesson):
+                    raise RuntimeError("capture processes did not stop cleanly")
+                state = self.store.read()
+                message = f"stopped {lesson.course_name} lecture {lesson.lecture_number}"
+            elif command.kind == "extend":
+                active = state["active"]
+                if active is None:
+                    raise RuntimeError("no active lecture")
+                minutes = int(command.payload.get("minutes", 15))
+                if not 1 <= minutes <= 180:
+                    raise RuntimeError("extension must be between 1 and 180 minutes")
+                lesson = self.by_id[active["occurrence_id"]]
+                previous = self._effective_end(active, lesson)
+                extended = previous + timedelta(minutes=minutes)
+                active["ends_at_override"] = extended.isoformat()
+                self.store.write(state)
+                message = f"extended until {extended.isoformat()}"
+            elif command.kind == "skip":
+                active_id = state["active"]["occurrence_id"] if state["active"] else None
+                handled = set(state["completed"]) | set(state["missed"])
+                upcoming = next(
+                    (
+                        item
+                        for item in self.schedule.lessons
+                        if item.occurrence_id != active_id
+                        and item.occurrence_id not in handled
+                        and item.ends_at > now
+                    ),
+                    None,
+                )
+                if upcoming is None:
+                    raise RuntimeError("no upcoming lecture")
+                state["missed"].append(upcoming.occurrence_id)
+                self.store.write(state)
+                message = (
+                    f"skipped {upcoming.course_name} lecture {upcoming.lecture_number}"
+                )
+            else:
+                raise RuntimeError(f"unsupported command: {command.kind}")
+        except (KeyError, TypeError, ValueError, RuntimeError) as error:
+            ok = False
+            message = str(error)
+
+        state = self.store.read()
+        state["handled_commands"] = (state["handled_commands"] + [command.id])[-200:]
+        self.store.write(state)
+        return {"id": command.id, "ok": ok, "message": message}
+
+    def snapshot(self, now: datetime) -> dict:
+        state = self.store.read()
+        active_data = state["active"]
+        active_lesson = (
+            self.by_id.get(active_data["occurrence_id"]) if active_data else None
+        )
+        handled = set(state["completed"]) | set(state["missed"])
+        active_id = active_lesson.occurrence_id if active_lesson else None
+        upcoming = next(
+            (
+                item
+                for item in self.schedule.lessons
+                if item.occurrence_id != active_id
+                and item.occurrence_id not in handled
+                and item.ends_at > now
+            ),
+            None,
+        )
+
+        def moment(lesson: Lesson | None, end: datetime | None = None) -> dict | None:
+            if lesson is None:
+                return None
+            return {
+                "courseId": lesson.course_id,
+                "courseName": lesson.course_name,
+                "lecture": lesson.lecture_number,
+                "slot": lesson.slot,
+                "startsAt": lesson.starts_at.isoformat(),
+                "endsAt": (end or lesson.ends_at).isoformat(),
+            }
+
+        camera_enabled = self.schedule.camera.get("enabled", True) is not False
+        camera_running = bool(
+            active_data
+            and self.controller.camera_running(active_data.get("camera_pid"))
+        )
+        if not camera_enabled:
+            camera_status = "disabled"
+        elif camera_running:
+            camera_status = "running"
+        elif active_lesson and now < active_lesson.starts_at:
+            camera_status = "prewarming"
+        elif active_lesson:
+            camera_status = "waiting-session"
+        else:
+            camera_status = "stopped"
+        if active_lesson:
+            scheduler_status = (
+                "prewarming" if now < active_lesson.starts_at else "recording"
+            )
+        else:
+            scheduler_status = "complete" if self.finished() else "idle"
+        session_id = control.read_state().get("session") if active_lesson else None
+        try:
+            pending = DurableOutbox().pending_count()
+        except OSError:
+            pending = 0
+        effective_end = (
+            self._effective_end(active_data, active_lesson)
+            if active_data and active_lesson
+            else None
+        )
+        return {
+            "agentId": self.schedule.agent_id,
+            "hostname": socket.gethostname(),
+            "schedulerStatus": scheduler_status,
+            "sessionId": session_id,
+            "current": moment(active_lesson, effective_end),
+            "next": moment(upcoming),
+            "audioStatus": "running" if self.controller.audio_running() else "stopped",
+            "cameraStatus": camera_status,
+            "zoomStatus": self.controller.zoom_status(),
+            "outboxPending": pending,
+            "errors": state["errors"][-20:],
+        }
 
     def finished(self) -> bool:
         state = self.store.read()
