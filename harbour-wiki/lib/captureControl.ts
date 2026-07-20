@@ -171,6 +171,43 @@ function serializeCommand(row: CommandRow) {
   };
 }
 
+export type ScheduleRow = {
+  agent_id: string;
+  body: unknown;
+  version: string;
+  updated_at: Date;
+};
+
+// A fresh opaque version on every upload — the agent echoes it back, so even
+// re-uploading an identical body forces the lecture PC to reload.
+function nextScheduleVersion(): string {
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+export async function putSchedule(
+  agentId: string,
+  body: unknown,
+): Promise<{ version: string }> {
+  const version = nextScheduleVersion();
+  await q(
+    `INSERT INTO harbour_wiki.capture_schedule (agent_id, body, version, updated_at)
+     VALUES ($1, $2::jsonb, $3, now())
+     ON CONFLICT (agent_id) DO UPDATE SET
+       body = EXCLUDED.body, version = EXCLUDED.version, updated_at = now()`,
+    [agentId, JSON.stringify(body), version],
+  );
+  return { version };
+}
+
+export async function getScheduleForAgent(agentId: string): Promise<ScheduleRow | null> {
+  const [row] = await q<ScheduleRow>(
+    `SELECT agent_id, body, version, updated_at
+     FROM harbour_wiki.capture_schedule WHERE agent_id = $1`,
+    [agentId],
+  );
+  return row ?? null;
+}
+
 export async function captureDashboardData() {
   const agents = await q<Record<string, unknown>>(
     `SELECT ca.*,
@@ -187,5 +224,14 @@ export async function captureDashboardData() {
     `SELECT * FROM harbour_wiki.capture_command
      ORDER BY created_at DESC LIMIT 50`,
   );
-  return { agents, commands: commands.map(serializeCommand), serverTime: new Date() };
+  const schedules = await q<ScheduleRow>(
+    `SELECT agent_id, body, version, updated_at
+     FROM harbour_wiki.capture_schedule ORDER BY updated_at DESC`,
+  );
+  return {
+    agents,
+    commands: commands.map(serializeCommand),
+    schedules,
+    serverTime: new Date(),
+  };
 }

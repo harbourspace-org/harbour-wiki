@@ -122,6 +122,16 @@ CREATE TABLE IF NOT EXISTS harbour_wiki.capture_command (
 );
 CREATE INDEX IF NOT EXISTS ix_capture_command_pending
   ON harbour_wiki.capture_command (agent_id, status, created_at);
+-- Per-agent timetable, uploaded from an operator's laptop and pulled by the
+-- lecture PC so recordings start on schedule without touching the machine.
+-- The version is opaque and server-owned — the agent echoes it back to detect
+-- changes. body is the raw schedule JSON the capture side validates.
+CREATE TABLE IF NOT EXISTS harbour_wiki.capture_schedule (
+  agent_id text PRIMARY KEY,
+  body jsonb NOT NULL,
+  version text NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
 `;
 
 export function ready(): Promise<void> {

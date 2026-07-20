@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -25,7 +26,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import control
 from .outbox import DurableOutbox
-from .remote_control import RemoteCommand, RemoteControlClient
+from .remote_control import RemoteCommand, RemoteControlClient, ScheduleClient
 
 SLOTS: dict[int, tuple[clock_time, clock_time]] = {
     1: (clock_time(9, 0), clock_time(12, 30)),
@@ -49,11 +50,13 @@ WEEKDAYS = {
     "воскресенье": 6,
 }
 TASK_NAME = "HarbourWikiLectureScheduler"
+AGENT_TASK_NAME = "HarbourWikiCaptureAgent"
 SCHEDULER_STATE = control.STATE_DIR / "scheduler-state.json"
 SCHEDULER_PID = control.STATE_DIR / "scheduler.pid"
 SCHEDULER_LOG = control.STATE_DIR / "scheduler.log"
 CAMERA_LOG = control.STATE_DIR / "camera.log"
 LAUNCHER = control.STATE_DIR / "run-scheduler.cmd"
+AGENT_LAUNCHER = control.STATE_DIR / "run-agent.cmd"
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,7 @@ class Schedule:
     camera: dict
     agent_id: str
     heartbeat_seconds: float
+    version: str = ""
 
 
 def _course_id(name: str) -> str:
@@ -115,13 +119,37 @@ def _lesson_date(raw: dict, start_date: date, weeks: int) -> date:
     return lesson_date
 
 
+def schedule_version(raw: dict) -> str:
+    """Stable content hash of a raw schedule — used to detect remote changes."""
+    canonical = json.dumps(raw, sort_keys=True, default=str, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
 def load_schedule(path: str | Path) -> Schedule:
     schedule_path = Path(path).resolve()
     try:
         raw = json.loads(schedule_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read schedule {schedule_path}: {error}") from error
+    return _schedule_from_raw(
+        raw, source_path=schedule_path, workdir_default=schedule_path.parent
+    )
 
+
+def schedule_from_dict(raw: dict, *, workdir: Path) -> Schedule:
+    """Build a Schedule from a raw dict delivered by the wiki (remote schedule).
+
+    Runs the exact same validation as a file-loaded schedule, so a malformed
+    remote schedule is rejected before it can touch the recorder.
+    """
+    return _schedule_from_raw(
+        raw, source_path=Path("wiki://schedule"), workdir_default=workdir
+    )
+
+
+def _schedule_from_raw(
+    raw: dict, *, source_path: Path, workdir_default: Path
+) -> Schedule:
     try:
         zone = ZoneInfo(str(raw.get("timezone", "Europe/Madrid")))
     except ZoneInfoNotFoundError as error:
@@ -208,7 +236,7 @@ def load_schedule(path: str | Path) -> Schedule:
         raise ValueError("poll_seconds must be within 0.25..60")
     if not 2 <= heartbeat_seconds <= 60:
         raise ValueError("heartbeat_seconds must be within 2..60")
-    workdir = Path(raw.get("workdir") or schedule_path.parent).resolve()
+    workdir = Path(raw.get("workdir") or workdir_default).resolve()
     camera = dict(raw.get("camera") or {})
     if camera.get("modality", "board") not in {"board", "slide", "desk"}:
         raise ValueError("camera.modality must be board, slide, or desk")
@@ -226,7 +254,7 @@ def load_schedule(path: str | Path) -> Schedule:
                     "camera audience-zone points must be normalized [x, y]"
                 )
     return Schedule(
-        path=schedule_path,
+        path=source_path,
         timezone=zone,
         lessons=tuple(lessons),
         prewarm_seconds=prewarm_seconds,
@@ -237,6 +265,7 @@ def load_schedule(path: str | Path) -> Schedule:
         camera=camera,
         agent_id=str(raw.get("agent_id") or socket.gethostname()).strip(),
         heartbeat_seconds=heartbeat_seconds,
+        version=schedule_version(raw),
     )
 
 
@@ -582,6 +611,40 @@ class SchedulerEngine:
         self.store.write(state)
         return {"id": command.id, "ok": ok, "message": message}
 
+    def _record_error(self, message: str) -> None:
+        state = self.store.read()
+        state["errors"] = (state["errors"] + [message])[-50:]
+        self.store.write(state)
+
+    def remote_sync(self, client: RemoteControlClient, now: datetime) -> None:
+        """One heartbeat round-trip with the wiki (the external control server).
+
+        Reports the results of commands applied on the previous beat, publishes
+        the live snapshot, then applies any commands the operator queued from
+        the dashboard. A wiki that is briefly unreachable must never interrupt
+        an in-progress recording, so network failures are recorded and swallowed
+        rather than propagated into the run loop.
+        """
+        state = self.store.read()
+        pending_results = list(state["command_results"])
+        try:
+            commands = client.heartbeat(self.snapshot(now), pending_results)
+        except Exception as error:  # noqa: BLE001 — the recording outlives the wiki
+            self._record_error(f"heartbeat failed: {error}")
+            return
+        # The wiki has now acknowledged those results — clear them so each is
+        # reported exactly once, even if applying the new commands below throws.
+        if pending_results:
+            state = self.store.read()
+            state["command_results"] = []
+            self.store.write(state)
+        if not commands:
+            return
+        results = [self.apply_command(command, now) for command in commands]
+        state = self.store.read()
+        state["command_results"] = state["command_results"] + results
+        self.store.write(state)
+
     def snapshot(self, now: datetime) -> dict:
         state = self.store.read()
         active_data = state["active"]
@@ -692,10 +755,30 @@ def run(schedule: Schedule, *, once: bool = False) -> int:
     _acquire_scheduler_pid()
     controller = WindowsProcessController(schedule)
     engine = SchedulerEngine(schedule, controller, StateStore())
+    client = RemoteControlClient.from_workdir(schedule.workdir)
+    if client is None:
+        print(
+            "[scheduler] remote control OFF — set HARBOUR_WIKI_BASE_URL (and "
+            "CAPTURE_TOKEN) to manage this agent from the wiki",
+            flush=True,
+        )
+    else:
+        print(
+            f"[scheduler] remote control ON — agent '{schedule.agent_id}' "
+            f"reporting every {schedule.heartbeat_seconds:g}s",
+            flush=True,
+        )
     _prevent_windows_sleep(schedule.prevent_sleep)
+    last_heartbeat = 0.0
     try:
         while True:
-            engine.tick(datetime.now(schedule.timezone))
+            now = datetime.now(schedule.timezone)
+            engine.tick(now)
+            if client is not None and (
+                time.monotonic() - last_heartbeat >= schedule.heartbeat_seconds
+            ):
+                engine.remote_sync(client, now)
+                last_heartbeat = time.monotonic()
             if once or engine.finished():
                 if engine.finished():
                     print("[scheduler] timetable complete", flush=True)
@@ -703,11 +786,152 @@ def run(schedule: Schedule, *, once: bool = False) -> int:
             time.sleep(schedule.poll_seconds)
     finally:
         _prevent_windows_sleep(False)
-        try:
-            if int(SCHEDULER_PID.read_text().strip()) == os.getpid():
-                SCHEDULER_PID.unlink(missing_ok=True)
-        except (FileNotFoundError, ValueError):
-            pass
+        _release_scheduler_pid()
+
+
+def _release_scheduler_pid() -> None:
+    try:
+        if int(SCHEDULER_PID.read_text().strip()) == os.getpid():
+            SCHEDULER_PID.unlink(missing_ok=True)
+    except (FileNotFoundError, ValueError):
+        pass
+
+
+def _waiting_status(agent_id: str, errors: list[str]) -> dict:
+    """Heartbeat payload for an agent that is online but has no schedule yet —
+    so it still shows up on the dashboard while waiting for one."""
+    return {
+        "agentId": agent_id,
+        "hostname": socket.gethostname(),
+        "schedulerStatus": "waiting-schedule",
+        "sessionId": None,
+        "current": None,
+        "next": None,
+        "audioStatus": "stopped",
+        "cameraStatus": "stopped",
+        "zoomStatus": "unknown",
+        "outboxPending": 0,
+        "errors": errors[-20:],
+    }
+
+
+def _store_error(store: "StateStore", message: str) -> None:
+    state = store.read()
+    state["errors"] = (state["errors"] + [message])[-50:]
+    store.write(state)
+    print(f"[agent] {message}", flush=True)
+
+
+def _reconcile_stale_active(engine: "SchedulerEngine") -> None:
+    """A fresh agent may inherit an ``active`` lecture from a crashed run whose
+    lesson no longer exists in the newly-loaded schedule. Stop any orphaned
+    processes and drop it, so tick() never trips over an unknown occurrence."""
+    state = engine.store.read()
+    active = state["active"]
+    if active is not None and active["occurrence_id"] not in engine.by_id:
+        engine.controller.stop_camera(active.get("camera_pid"))
+        engine.controller.stop_audio()
+        state["active"] = None
+        engine.store.write(state)
+
+
+def agent_loop(
+    agent_id: str,
+    workdir: Path,
+    *,
+    iterations: int | None = None,
+    schedule_client: "ScheduleClient | None" = None,
+    control_client: "RemoteControlClient | None" = None,
+    store: "StateStore | None" = None,
+    controller_factory=WindowsProcessController,
+    acquire_pid: bool = True,
+) -> int:
+    """Run as a wiki-managed agent: pull this machine's timetable from the wiki,
+    record on schedule, and hot-reload the timetable when the operator changes
+    it remotely (deferred until any live recording finishes). The heartbeat/
+    command channel from ``run()`` rides along for stop/extend/skip + status.
+    """
+    if acquire_pid:
+        _acquire_scheduler_pid()
+    if schedule_client is None:
+        schedule_client = ScheduleClient.from_workdir(workdir, agent_id)
+    if schedule_client is None:
+        raise RuntimeError(
+            "HARBOUR_WIKI_BASE_URL is not set — agent mode needs the wiki URL in .env"
+        )
+    if control_client is None:
+        control_client = RemoteControlClient.from_workdir(workdir)
+    if store is None:
+        store = StateStore()
+
+    engine: SchedulerEngine | None = None
+    schedule: Schedule | None = None
+    version: str | None = None
+    last_heartbeat = 0.0
+    count = 0
+    print(
+        f"[agent] '{agent_id}' online — waiting for a schedule from the wiki …",
+        flush=True,
+    )
+    try:
+        while True:
+            recording = engine is not None and store.read()["active"] is not None
+            # 1. Pull schedule changes — but never swap out a live recording.
+            if not recording:
+                update = None
+                try:
+                    update = schedule_client.fetch(version)
+                except Exception as error:  # noqa: BLE001 — keep recording through wiki blips
+                    _store_error(store, f"schedule fetch failed: {error}")
+                if update is not None:
+                    # The CLI --agent-id is authoritative: force it into the body
+                    # so the id the agent fetches with matches the id it reports.
+                    body = {**update.body, "agent_id": agent_id}
+                    # Remember the version even if it turns out invalid, so a
+                    # known-bad schedule isn't re-pulled and re-rejected every
+                    # beat — the operator must upload a fresh version to retry.
+                    version = update.version
+                    try:
+                        schedule = schedule_from_dict(body, workdir=workdir)
+                    except (ValueError, KeyError, TypeError) as error:
+                        _store_error(store, f"rejected remote schedule: {error}")
+                    else:
+                        engine = SchedulerEngine(
+                            schedule, controller_factory(schedule), store
+                        )
+                        _reconcile_stale_active(engine)
+                        _prevent_windows_sleep(schedule.prevent_sleep)
+                        print(
+                            f"[agent] applied schedule {version} "
+                            f"({len(schedule.lessons)} lessons)",
+                            flush=True,
+                        )
+            # 2. Drive the timetable.
+            now = datetime.now(schedule.timezone if schedule else timezone.utc)
+            if engine is not None:
+                engine.tick(now)
+            # 3. Report status + accept stop/extend/skip.
+            heartbeat_every = schedule.heartbeat_seconds if schedule else 5.0
+            if time.monotonic() - last_heartbeat >= heartbeat_every:
+                if engine is not None:
+                    engine.remote_sync(control_client, now)
+                else:
+                    try:
+                        control_client.heartbeat(
+                            _waiting_status(agent_id, store.read()["errors"]), []
+                        )
+                    except Exception as error:  # noqa: BLE001
+                        _store_error(store, f"heartbeat failed: {error}")
+                last_heartbeat = time.monotonic()
+
+            count += 1
+            if iterations is not None and count >= iterations:
+                return 0
+            time.sleep(schedule.poll_seconds if schedule else 3.0)
+    finally:
+        _prevent_windows_sleep(False)
+        if acquire_pid:
+            _release_scheduler_pid()
 
 
 def _print_schedule(schedule: Schedule) -> None:
@@ -762,6 +986,53 @@ def uninstall() -> int:
     subprocess.run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"], check=True)
     LAUNCHER.unlink(missing_ok=True)
     print(f"removed Windows task '{TASK_NAME}'")
+    return 0
+
+
+def install_agent(agent_id: str, workdir: Path, *, start_now: bool = True) -> int:
+    """Auto-start the wiki-managed agent at login via Task Scheduler, so a
+    lecture PC records on its remotely-managed schedule with no manual step."""
+    if os.name != "nt":
+        raise RuntimeError("Task Scheduler installation is supported only on Windows")
+    if not workdir.is_dir():
+        raise RuntimeError(f"workdir does not exist: {workdir}")
+    control.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    launcher = (
+        "@echo off\r\n"
+        f'cd /d "{workdir}"\r\n'
+        f'"{sys.executable}" -m lecture_capture.scheduler agent '
+        f'--agent-id "{agent_id}" --workdir "{workdir}" '
+        f'>> "{SCHEDULER_LOG}" 2>&1\r\n'
+    )
+    AGENT_LAUNCHER.write_text(launcher, encoding="utf-8")
+    subprocess.run(["schtasks", "/End", "/TN", AGENT_TASK_NAME], check=False)
+    subprocess.run(
+        [
+            "schtasks",
+            "/Create",
+            "/TN",
+            AGENT_TASK_NAME,
+            "/SC",
+            "ONLOGON",
+            "/TR",
+            f'cmd.exe /d /c ""{AGENT_LAUNCHER}""',
+            "/F",
+        ],
+        check=True,
+    )
+    if start_now:
+        subprocess.run(["schtasks", "/Run", "/TN", AGENT_TASK_NAME], check=True)
+    print(f"installed Windows task '{AGENT_TASK_NAME}' for agent '{agent_id}'")
+    return 0
+
+
+def uninstall_agent() -> int:
+    if os.name != "nt":
+        raise RuntimeError("Task Scheduler installation is supported only on Windows")
+    subprocess.run(["schtasks", "/End", "/TN", AGENT_TASK_NAME], check=False)
+    subprocess.run(["schtasks", "/Delete", "/TN", AGENT_TASK_NAME, "/F"], check=True)
+    AGENT_LAUNCHER.unlink(missing_ok=True)
+    print(f"removed Windows task '{AGENT_TASK_NAME}'")
     return 0
 
 
@@ -820,11 +1091,45 @@ def main(argv: list[str] | None = None) -> int:
             child.add_argument("--once", action="store_true")
         if command == "install":
             child.add_argument("--no-start", action="store_true")
+    for command in ("agent", "install-agent"):
+        child = sub.add_parser(
+            command,
+            help="Run as a wiki-managed agent: pull this machine's timetable "
+            "from the wiki and record on schedule (no local --schedule file)."
+            if command == "agent"
+            else "Auto-start the wiki-managed agent at login (Windows).",
+        )
+        child.add_argument(
+            "--agent-id",
+            default=socket.gethostname(),
+            help="Identifier this PC reports to the wiki (default: hostname).",
+        )
+        child.add_argument(
+            "--workdir",
+            type=Path,
+            default=Path.cwd(),
+            help="Directory holding .env with HARBOUR_WIKI_BASE_URL + CAPTURE_TOKEN.",
+        )
+        if command == "install-agent":
+            child.add_argument("--no-start", action="store_true")
     sub.add_parser("uninstall")
+    sub.add_parser("uninstall-agent")
     args = parser.parse_args(argv)
     try:
         if args.command == "uninstall":
             return uninstall()
+        if args.command == "uninstall-agent":
+            return uninstall_agent()
+        if args.command in ("agent", "install-agent"):
+            agent_id = args.agent_id.strip()
+            if not re.fullmatch(r"[A-Za-z0-9._-]{1,200}", agent_id):
+                raise ValueError(
+                    "agent id may only contain letters, digits, . _ - (max 200)"
+                )
+            workdir = args.workdir.resolve()
+            if args.command == "install-agent":
+                return install_agent(agent_id, workdir, start_now=not args.no_start)
+            return agent_loop(agent_id, workdir)
         schedule = load_schedule(args.schedule)
         if args.command == "validate":
             _print_schedule(schedule)

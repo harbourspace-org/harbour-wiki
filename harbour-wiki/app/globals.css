@@ -258,6 +258,18 @@ li { margin: 0.2em 0; }
 .capture-danger { color: #b32424; border-color: #b32424; }
 .capture-commands { margin-top: 0.7rem; color: var(--text-soft); font-size: 0.85rem; }
 .capture-commands summary { cursor: pointer; }
+.capture-schedule { margin-top: 0.7rem; border-top: 1px solid var(--rule); padding-top: 0.7rem; }
+.capture-schedule summary { cursor: pointer; font-weight: 600; }
+.capture-schedule-hint { margin: 0.5rem 0; font-size: 0.82rem; }
+.capture-schedule-text {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  resize: vertical;
+  white-space: pre;
+  overflow-x: auto;
+}
 @media (max-width: 700px) {
   .capture-course-grid, .capture-status-grid, .capture-facts { grid-template-columns: 1fr; }
   .capture-login-row, .capture-actions { align-items: stretch; flex-direction: column; }

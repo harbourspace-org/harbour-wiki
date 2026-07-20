@@ -37,13 +37,33 @@ type Command = {
   error: string | null;
 };
 
+type ScheduleEntry = {
+  agent_id: string;
+  body: unknown;
+  version: string;
+  updated_at: string;
+};
+
 type DashboardData = {
   agents: Agent[];
   commands: Command[];
+  schedules: ScheduleEntry[];
   serverTime: string;
 };
 
 const GOOD = new Set(["recording", "prewarming", "running", "connected", "idle"]);
+
+const SCHEDULE_TEMPLATE = JSON.stringify(
+  {
+    timezone: "Europe/Madrid",
+    start_date: "2026-09-07",
+    weeks: 3,
+    camera: { enabled: true, device: 0 },
+    lessons: [{ week: 1, day: "monday", slot: 1, course: "Example Course" }],
+  },
+  null,
+  2,
+);
 
 function when(value: string | null | undefined) {
   if (!value) return "—";
@@ -63,6 +83,84 @@ function Status({ label, value }: { label: string; value: string }) {
         <small>{value}</small>
       </span>
     </div>
+  );
+}
+
+function ScheduleEditor({
+  agentId,
+  entry,
+  operatorKey,
+  onSaved,
+}: {
+  agentId: string;
+  entry: ScheduleEntry | undefined;
+  operatorKey: string;
+  onSaved: () => void;
+}) {
+  const version = entry?.version ?? "";
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  // Seed from the stored schedule; re-seed only when the stored version
+  // changes, so it never clobbers what the operator is mid-typing.
+  useEffect(() => {
+    setText(entry ? JSON.stringify(entry.body, null, 2) : SCHEDULE_TEMPLATE);
+    setMsg("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [version]);
+
+  async function save() {
+    let schedule: unknown;
+    try {
+      schedule = JSON.parse(text);
+    } catch (cause) {
+      setMsg(`Invalid JSON: ${String(cause)}`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const response = await fetch("/api/capture/schedule", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key: operatorKey, agentId, schedule }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+      setMsg("Saved — the lecture PC applies it on its next heartbeat.");
+      onSaved();
+    } catch (cause) {
+      setMsg(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <details className="capture-schedule">
+      <summary>
+        Schedule {version ? `· v${version}` : "· not set"}
+        {entry && <small className="muted"> · updated {when(entry.updated_at)}</small>}
+      </summary>
+      <p className="muted capture-schedule-hint">
+        Timetable JSON for this PC. Saving pushes it to the machine remotely — it
+        records on schedule with no local file. Full validation runs on the
+        lecture PC; a rejected schedule appears under Errors above.
+      </p>
+      <textarea
+        className="field capture-schedule-text"
+        spellCheck={false}
+        rows={14}
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+      />
+      <div className="capture-actions">
+        <button className="btn" type="button" disabled={busy} onClick={() => void save()}>
+          {busy ? "Saving…" : "Save & push schedule"}
+        </button>
+        {msg && <span className="muted">{msg}</span>}
+      </div>
+    </details>
   );
 }
 
@@ -270,6 +368,13 @@ export function CaptureDashboard() {
                 </ul>
               </details>
             )}
+
+            <ScheduleEditor
+              agentId={agent.agent_id}
+              entry={data.schedules?.find((item) => item.agent_id === agent.agent_id)}
+              operatorKey={key}
+              onSaved={() => void refresh()}
+            />
           </section>
         );
       })}
