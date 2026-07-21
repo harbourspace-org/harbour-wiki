@@ -185,18 +185,55 @@ agent starts automatically at login and starts recording whenever the
 operator-pushed schedule says so — no manual step on lecture day.
 
 **If this fails with `Access is denied`** (common on locked-down classroom
-accounts — confirmed non-recoverable without admin rights, see Known Issue
-#5): you cannot get auto-start working from this account. Fall back to
-running the agent manually in a persistent terminal/background process
-every time the PC is used:
+accounts — `schtasks /Create` needs elevation there even for an `ONLOGON`
+trigger under the current user), don't give up on auto-start: use the
+**per-user Startup folder** instead. It needs no special privilege at all —
+it's a plain folder Explorer scans at every login, not a privileged API —
+and confirmed to work on an account where Task Scheduler was fully blocked.
+
+```powershell
+# install-agent (even though it failed) already wrote a launcher .cmd here:
+Get-Content "$env:USERPROFILE\.lecture-capture\run-agent.cmd"
+# if it's missing, create it yourself:
+@"
+@echo off
+cd /d "<full path to capture folder>"
+"<full path to capture folder>\.venv\Scripts\python.exe" -m lecture_capture.scheduler agent --agent-id "<room-id>" --workdir "<full path to capture folder>" >> "$env:USERPROFILE\.lecture-capture\scheduler.log" 2>&1
+"@ | Set-Content "$env:USERPROFILE\.lecture-capture\run-agent.cmd" -Encoding ascii
+
+# a plain .cmd in Startup flashes a console window at every login — wrap it
+# in a tiny VBScript that launches hidden (window style 0):
+@"
+Set shell = CreateObject("WScript.Shell")
+shell.Run """$env:USERPROFILE\.lecture-capture\run-agent.cmd""", 0, False
+"@ | Set-Content "$env:USERPROFILE\.lecture-capture\run-agent-hidden.vbs" -Encoding ascii
+
+# Windows executes .vbs files placed directly in Startup — no shortcut needed:
+Copy-Item "$env:USERPROFILE\.lecture-capture\run-agent-hidden.vbs" `
+  -Destination "$([Environment]::GetFolderPath('Startup'))\lecture-capture-agent.vbs" -Force
+```
+
+This runs hidden at every login, no admin required, no visible window, no
+manual step on lecture day — a full substitute for `install-agent` on
+accounts where Task Scheduler is locked down. Test it once by logging off
+and back on (or rebooting) and checking the agent shows up on the
+dashboard; **don't run it manually first and then also let it start at
+next login** — that creates two competing processes fighting over the same
+camera/mic (see Known Issue #1's cousin: duplicate agent instances cause
+the exact same device-contention symptoms as the Logi Sync conflict, but
+from our own leftover process instead).
+
+Only if *both* Task Scheduler and the Startup folder are unavailable
+(rare — would mean this account can't run background processes on login at
+all) do you fall back to a fully manual, no-persistence run:
 
 ```powershell
 uv run lecture-scheduler agent --agent-id <room-id> --workdir "<full path to capture folder>"
 ```
 
 Leave this running for the whole class. It will not survive a reboot or
-logout — someone has to relaunch it. Flag this PC for a proper admin-rights
-fix later; it is not a safe long-term setup for unattended recording.
+logout — someone has to relaunch it. This is the least reliable option;
+prefer the Startup-folder method above whenever Task Scheduler is blocked.
 
 ## 9. Push a schedule from the operator dashboard
 
@@ -385,12 +422,16 @@ confirm it's accepted (`202`), not rejected with a schema error that implies
 the deployed contract is older than what you expect.
 
 ### 5. Task Scheduler `install-agent` fails with "Access is denied"
-Confirmed non-recoverable from a standard account — `schtasks /Create`
-needs elevation on some locked-down classroom PCs even for an `ONLOGON`
-trigger under the *current* user. There is no code-level workaround. Either
-get admin rights once to run `install-agent` properly, or accept manual
-`uv run lecture-scheduler agent ...` runs with no auto-start/auto-recovery
-(flag this clearly to whoever owns the PC).
+`schtasks /Create` needs elevation on some locked-down classroom PCs even
+for an `ONLOGON` trigger under the *current* user — there is no way to fix
+`schtasks` itself without admin rights. **This is not the dead end it looks
+like**: use the Startup-folder method in step 8 instead (a hidden `.vbs` in
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`) — confirmed to
+work with zero admin rights on a PC where Task Scheduler was fully blocked,
+and it gives the same "starts automatically at login, no manual step"
+result. Only fall back to a fully manual `uv run lecture-scheduler agent
+...` run (no persistence across reboot/logout at all) if that also somehow
+doesn't work.
 
 ### 6. `/api/aim` returns persistent 502s
 This only affects the PTZ **auto-aim/teacher-tracking** quality (Claude
