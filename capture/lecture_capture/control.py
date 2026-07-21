@@ -74,8 +74,13 @@ def cmd_start(argv: list[str]) -> int:
 
     kwargs: dict = {}
     if os.name == "nt":  # pragma: no cover — Windows lecture PC
+        # CREATE_NO_WINDOW (not DETACHED_PROCESS): a detached console app still
+        # pops a console window on Windows — that spawned a storm of empty
+        # PowerShell windows in the classroom. NO_WINDOW keeps the recorder
+        # headless while CREATE_NEW_PROCESS_GROUP still lets `stop` deliver
+        # CTRL_BREAK for a clean flush.
         kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
         )
     else:
         kwargs["start_new_session"] = True

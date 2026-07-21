@@ -57,6 +57,7 @@ SCHEDULER_LOG = control.STATE_DIR / "scheduler.log"
 CAMERA_LOG = control.STATE_DIR / "camera.log"
 LAUNCHER = control.STATE_DIR / "run-scheduler.cmd"
 AGENT_LAUNCHER = control.STATE_DIR / "run-agent.cmd"
+AUDIO_RESTART_COOLDOWN = 30.0  # min seconds between recorder (re)start attempts
 
 
 @dataclass(frozen=True)
@@ -294,6 +295,15 @@ class StateStore:
         tmp.replace(self.path)
 
 
+def _no_window_run_kwargs() -> dict:
+    """Keep synchronous `control start/stop` calls headless on Windows so they
+    never flash a console window — important when the agent itself runs under
+    Task Scheduler (no console) or is restarted repeatedly."""
+    if os.name == "nt":  # pragma: no cover — Windows lecture PC
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}  # type: ignore[attr-defined]
+    return {}
+
+
 class WindowsProcessController:
     """Launch the existing supervised audio recorder and one camera process."""
 
@@ -362,6 +372,7 @@ class WindowsProcessController:
             ],
             cwd=self.schedule.workdir,
             check=False,
+            **_no_window_run_kwargs(),
         )
         return result.returncode == 0
 
@@ -370,6 +381,7 @@ class WindowsProcessController:
             [sys.executable, "-m", "lecture_capture.control", "stop"],
             cwd=self.schedule.workdir,
             check=False,
+            **_no_window_run_kwargs(),
         )
         return result.returncode == 0
 
@@ -422,8 +434,10 @@ class WindowsProcessController:
             return None
         kwargs: dict = {}
         if os.name == "nt":  # pragma: no cover — exercised on classroom PC
+            # CREATE_NO_WINDOW keeps the camera process headless — DETACHED_PROCESS
+            # opens a console window per launch, which storm-spawned in class.
             kwargs["creationflags"] = (
-                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
             )
         else:
             kwargs["start_new_session"] = True
@@ -504,6 +518,17 @@ class SchedulerEngine:
                 self._finish_active(state, lesson)
                 return
             if not self.controller.audio_running():
+                last = active.get("audio_started_at")
+                if last:
+                    try:
+                        if (
+                            now - datetime.fromisoformat(last)
+                        ).total_seconds() < AUDIO_RESTART_COOLDOWN:
+                            return  # back off — never respawn the recorder every poll
+                    except (ValueError, TypeError):
+                        pass
+                active["audio_started_at"] = now.isoformat()
+                self.store.write(state)
                 if not self.controller.start_audio(lesson):
                     return
             if now >= lesson.starts_at and not self.controller.camera_running(

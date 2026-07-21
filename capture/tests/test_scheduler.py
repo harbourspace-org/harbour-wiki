@@ -288,6 +288,43 @@ def test_remote_sync_survives_wiki_outage_without_touching_recording(tmp_path):
     assert any("heartbeat failed" in message for message in state["errors"])
 
 
+class CrashingAudioController(FakeController):
+    """start_audio 'succeeds' but the recorder never stays up (audio_running
+    stays False) — models a recorder that dies right after launch."""
+
+    def start_audio(self, lesson):
+        self.started_audio.append(lesson)
+        return True
+
+
+def test_audio_restart_is_throttled_when_recorder_keeps_dying(tmp_path):
+    schedule = load_schedule(
+        write_schedule(
+            tmp_path,
+            [{"week": 1, "day": "monday", "slot": 1, "course": "Algorithms"}],
+        )
+    )
+    lesson = schedule.lessons[0]
+    store = StateStore(tmp_path / "state.json")
+    store.write(
+        {
+            "active": {"occurrence_id": lesson.occurrence_id, "camera_pid": None},
+            "completed": [], "missed": [], "handled_commands": [],
+            "command_results": [], "errors": [],
+        }
+    )
+    controller = CrashingAudioController()
+    engine = SchedulerEngine(schedule, controller, store)
+    t = lesson.starts_at + timedelta(minutes=1)
+
+    engine.tick(t)  # first attempt
+    assert len(controller.started_audio) == 1
+    engine.tick(t + timedelta(seconds=5))  # within cooldown -> no respawn storm
+    assert len(controller.started_audio) == 1
+    engine.tick(t + timedelta(seconds=40))  # past cooldown -> one more try
+    assert len(controller.started_audio) == 2
+
+
 def test_run_once_reports_a_single_heartbeat(tmp_path, monkeypatch):
     schedule = load_schedule(
         write_schedule(
